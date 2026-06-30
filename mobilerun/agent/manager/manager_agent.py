@@ -38,6 +38,7 @@ from mobilerun.agent.manager.events import (
 from mobilerun.agent.manager.prompts import parse_manager_response
 from mobilerun.agent.usage import get_usage_from_response
 from mobilerun.agent.utils.chat_utils import filter_empty_messages
+from mobilerun.agent.utils.context_hasher import state_hash
 from mobilerun.agent.utils.inference import acall_with_retries
 from mobilerun.agent.utils.prompt_resolver import PromptResolver
 from mobilerun.agent.utils.tracing_setup import record_langfuse_screenshot
@@ -108,6 +109,9 @@ class ManagerAgent(Workflow):
         self.tracing_config = tracing_config
         self.standard_tool_names: set[str] | None = None
 
+        # Phase1: device_state change detection
+        self._last_injected_state_hash: str = ""
+
         # Initialize app card provider
         self.app_card_provider: AppCardProvider = self._initialize_app_card_provider()
 
@@ -119,7 +123,7 @@ class ManagerAgent(Workflow):
 
             class DisabledProvider(AppCardProvider):
                 async def load_app_card(
-                    self, package_name: str, instruction: str = ""
+                    self, identifier: str, instruction: str = "", platform: str = "android"
                 ) -> str:
                     return ""
 
@@ -283,28 +287,24 @@ class ManagerAgent(Workflow):
             # Add current device state
             current_state = self.shared_state.formatted_device_state.strip()
             if current_state:
-                messages[last_user_idx].blocks.append(
-                    TextBlock(
-                        text=f"\n<device_state>\n{current_state}\n</device_state>\n"
+                current_hash = state_hash(current_state)
+                if current_hash != self._last_injected_state_hash:
+                    messages[last_user_idx].blocks.append(
+                        TextBlock(
+                            text=f"\n<device_state>\n{current_state}\n</device_state>\n"
+                        )
                     )
-                )
+                    self._last_injected_state_hash = current_hash
+                else:
+                    messages[last_user_idx].blocks.append(
+                        TextBlock(text="\n<device_state_unchanged/>\n")
+                    )
 
             # Add screenshot if vision enabled
             if screenshot and self.vision:
                 if should_resize_model_screenshot(self.state_provider):
                     screenshot = resize_image_to_max_side_with_grid(screenshot)
                 messages[last_user_idx].blocks.append(ImageBlock(image=screenshot))
-
-            # Add previous device state to second-to-last user message
-            if len(user_indices) >= 2:
-                second_last_idx = user_indices[-2]
-                prev_state = self.shared_state.previous_formatted_device_state.strip()
-                if prev_state:
-                    messages[second_last_idx].blocks.append(
-                        TextBlock(
-                            text=f"\n<previous_device_state>\n{prev_state}\n</previous_device_state>\n"
-                        )
-                    )
 
         messages = filter_empty_messages(messages)
         return messages
@@ -409,10 +409,7 @@ class ManagerAgent(Workflow):
         ui_state = await self.state_provider.get_state()
         self.action_ctx.ui = ui_state
 
-        # Update shared state (previous ← current, current ← new)
-        self.shared_state.previous_formatted_device_state = (
-            self.shared_state.formatted_device_state
-        )
+        # Update shared state
         self.shared_state.formatted_device_state = ui_state.formatted_text
         self.shared_state.focused_text = ui_state.focused_text
         self.shared_state.a11y_tree = ui_state.elements
@@ -431,7 +428,7 @@ class ManagerAgent(Workflow):
         if self.app_card_config.enabled:
             try:
                 self.shared_state.app_card = await self.app_card_provider.load_app_card(
-                    package_name=self.shared_state.current_package_name,
+                    identifier=self.shared_state.current_package_name,
                     instruction=self.shared_state.instruction,
                 )
             except Exception as e:

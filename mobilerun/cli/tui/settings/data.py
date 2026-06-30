@@ -116,12 +116,31 @@ class SettingsData:
                         api_key = ""
                         if sources:
                             api_key = sources.shell or sources.saved
-                elif provider == "OpenAILike":
-                    api_key = lp.kwargs.get("api_key", "stub")
-                    selected_source = "auto"
                 else:
-                    api_key = lp.kwargs.get("api_key", "")
-                    selected_source = "auto"
+                    # Resolve env_slot from provider_family for OpenAILike
+                    # (same approach as to_load_llm_kwargs in config_manager.py)
+                    family = PROVIDER_FAMILY.get(provider)
+                    if family:
+                        sources = env_key_sources.get(family)
+                    else:
+                        sources = None
+                # If config.yaml has api_key field, use it directly
+                config_api_key = getattr(lp, "api_key", None)
+                if config_api_key:
+                    api_key = config_api_key
+                    selected_source = "config"
+                else:
+                    selected_source = getattr(lp, "api_key_source", "auto") or "auto"
+                if selected_source == "config":
+                    pass  # already set above
+                elif selected_source == "env":
+                    api_key = sources.shell if sources else ""
+                elif selected_source == "file":
+                    api_key = sources.saved if sources else ""
+                else:
+                    api_key = ""
+                    if sources:
+                        api_key = sources.saved or sources.shell
 
                 # Build kwargs without api_key (shown separately)
                 kwargs = {k: str(v) for k, v in lp.kwargs.items() if k != "api_key"}
@@ -204,7 +223,8 @@ class SettingsData:
                 except ValueError:
                     parsed[k] = v
         if ps.provider == "OpenAILike":
-            parsed["api_key"] = ps.api_key or "stub"
+            if ps.api_key:
+                parsed["api_key"] = ps.api_key
         return parsed
 
     @staticmethod

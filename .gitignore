@@ -41,3 +41,8 @@ frontend/
 reddit_python_posts.json
 
 test/
+# PEL (Page Element Layer) auto-generated page descriptions & cache
+.mobilerun/
+
+# macOS system files
+.DS_Store

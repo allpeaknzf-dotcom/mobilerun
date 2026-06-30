@@ -1,0 +1,20 @@
+{# Web platform extra instructions — injected into the system prompt #}
+
+## Web Platform Specifics
+
+You are controlling a **web browser** (not a mobile app). Keep these in mind:
+
+- Elements are indexed by their DOM position. Use `click` with element indices.
+- `open_app` navigates to URLs or domain names (e.g., "github.com", "https://example.com").
+- Use `scroll` to scroll the page up or down (instead of swipe gestures).
+- `system_button` supports: back (go back in history), enter, tab, escape.
+- Input fields support `type_text` and keyboard shortcuts.
+- Wait for pages to load after navigation — use `wait` if needed.
+- The page URL and title are shown in the device state header.
+
+## Mobile H5 Mode
+
+When running in mobile viewport mode:
+- The page renders as a mobile device would see it (responsive layout, touch events).
+- Use `tap` coordinates for precise clicks; element `click` for indexed targets.
+- Touch interactions like tap and swipe are supported.

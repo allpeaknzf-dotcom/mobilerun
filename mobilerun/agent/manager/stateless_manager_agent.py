@@ -95,7 +95,7 @@ class StatelessManagerAgent(Workflow):
             "instruction": self.shared_state.instruction,
             "device_date": self.shared_state.device_date,
             "previous_plan": self.shared_state.previous_plan,
-            "previous_state": self.shared_state.previous_formatted_device_state,
+            "previous_state": getattr(self.shared_state, "previous_formatted_device_state", ""),
             "memory": self.shared_state.agent_memory,
             "last_thought": self.shared_state.last_thought,
             "progress_summary": self.shared_state.progress_summary,
@@ -200,9 +200,6 @@ class StatelessManagerAgent(Workflow):
         ui_state = await self.state_provider.get_state()
         self.action_ctx.ui = ui_state
 
-        self.shared_state.previous_formatted_device_state = (
-            self.shared_state.formatted_device_state
-        )
         self.shared_state.formatted_device_state = ui_state.formatted_text
         self.shared_state.focused_text = ui_state.focused_text
         self.shared_state.a11y_tree = ui_state.elements

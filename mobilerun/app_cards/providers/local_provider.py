@@ -44,33 +44,33 @@ class LocalAppCardProvider(AppCardProvider):
         # Content cache: (package_name, instruction) -> content
         self._content_cache: Dict[tuple[str, str], str] = {}
 
-    async def load_app_card(self, package_name: str, instruction: str = "") -> str:
+    async def load_app_card(self, identifier: str, instruction: str = "", platform: str = "android") -> str:
         """
         Load app card for a package name from local files.
 
         Args:
-            package_name: Android package name (e.g., "com.google.android.gm")
+            identifier: package_name (Android), bundle_id (iOS), or domain (Web)
             instruction: User instruction (for cache key consistency, not used in loading)
 
         Returns:
             App card content or empty string if not found
         """
-        if not package_name:
+        if not identifier:
             return ""
 
         # Check content cache first
-        cache_key = (package_name, instruction)
+        cache_key = (identifier, instruction)
         if cache_key in self._content_cache:
-            logger.debug(f"App card cache hit: {package_name}")
+            logger.debug(f"App card cache hit: {identifier}")
             return self._content_cache[cache_key]
 
         # Check if package exists in mapping
-        if package_name not in self.mapping:
+        if identifier not in self.mapping:
             self._content_cache[cache_key] = ""
             return ""
 
         # Get app card file path (relative to app_cards_dir)
-        filename = self.mapping[package_name]
+        filename = self.mapping[identifier]
         app_card_path = self.app_cards_dir / filename
 
         # Read file
@@ -88,11 +88,11 @@ class LocalAppCardProvider(AppCardProvider):
 
             # Cache and return
             self._content_cache[cache_key] = content
-            logger.debug(f"Loaded app card for {package_name} from {app_card_path}")
+            logger.debug(f"Loaded app card for {identifier} from {app_card_path}")
             return content
 
         except Exception as e:
-            logger.warning(f"Failed to load app card for {package_name}: {e}")
+            logger.warning(f"Failed to load app card for {identifier}: {e}")
             self._content_cache[cache_key] = ""
             return ""
 

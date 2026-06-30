@@ -41,6 +41,7 @@ from mobilerun.agent.fast_agent.xml_parser import (
 )
 from mobilerun.agent.usage import get_usage_from_response
 from mobilerun.agent.utils.chat_utils import limit_history
+from mobilerun.agent.utils.context_hasher import state_hash
 from mobilerun.agent.utils.inference import acall_with_retries
 from mobilerun.agent.utils.prompt_resolver import PromptResolver
 from mobilerun.agent.utils.tracing_setup import record_langfuse_screenshot
@@ -106,6 +107,14 @@ class FastAgent(Workflow):
 
         self.system_prompt: ChatMessage | None = None
         self.tool_call_counter = 0
+        # Phase1: 工具定义按需发送
+        # optimize_tool_definitions=True 时仅在首轮和每15轮注入完整工具定义
+        self._optimize_tool_definitions = getattr(
+            agent_config, "optimize_tool_definitions", False
+        )
+        self.system_prompt_lite: ChatMessage | None = None
+        # Phase1: device_state change detection
+        self._last_injected_state_hash: str = ""
 
         # Build tool descriptions and param types from registry
         self.tool_descriptions = self.registry.get_tool_descriptions_xml()
@@ -148,6 +157,35 @@ class FastAgent(Workflow):
                 template_context,
             )
         return ChatMessage(role="system", content=system_text)
+
+    async def _build_system_prompt_lite(self) -> ChatMessage:
+        """Build system prompt WITHOUT tool definitions (subsequent turns)."""
+        template_context = {
+            "tool_descriptions": "<functions>See first message of this conversation</functions>",
+            "available_secrets": self._available_secrets,
+            "available_tools": set(self.registry.tools.keys()),
+            "variables": (
+                self.shared_state.custom_variables if self.shared_state else {}
+            ),
+            "output_schema": self._output_schema,
+            "parallel_tools": self.config.parallel_tools,
+            "vision": self.vision,
+            "platform": self.shared_state.platform if self.shared_state else "Android",
+            "screenshot_only": bool(
+                getattr(self.state_provider, "requires_coordinate_tools", False)
+            ),
+        }
+        custom_system_prompt = self.prompt_resolver.get_prompt("fast_agent_system")
+        if custom_system_prompt:
+            prompt_text = PromptLoader.render_template(
+                custom_system_prompt, template_context
+            )
+        else:
+            prompt_text = await PromptLoader.load_prompt(
+                self.agent_config.get_fast_agent_system_prompt_path(),
+                template_context,
+            )
+        return ChatMessage(role="system", content=prompt_text)
 
     async def _build_user_prompt(self, goal: str) -> ChatMessage:
         """Build initial user prompt message."""
@@ -193,6 +231,8 @@ class FastAgent(Workflow):
         # Build system prompt (lazy load)
         if self.system_prompt is None:
             self.system_prompt = await self._build_system_prompt()
+            if self._optimize_tool_definitions:
+                self.system_prompt_lite = await self._build_system_prompt_lite()
 
         # Get goal and build user message
         user_input = ev.get("input", default=None)
@@ -266,10 +306,7 @@ class FastAgent(Workflow):
             ui_state = await self.state_provider.get_state()
             self.action_ctx.ui = ui_state
 
-            # Update shared state (previous ← current, current ← new)
-            self.shared_state.previous_formatted_device_state = (
-                self.shared_state.formatted_device_state
-            )
+            # Update shared state
             self.shared_state.formatted_device_state = ui_state.formatted_text
             self.shared_state.focused_text = ui_state.focused_text
             self.shared_state.a11y_tree = ui_state.elements
@@ -300,7 +337,18 @@ class FastAgent(Workflow):
             LLM_HISTORY_LIMIT * 2,
             preserve_first=True,
         )
-        messages_to_send = [self.system_prompt] + copy.deepcopy(limited_history)
+        # Phase1: 工具定义按需发送
+        _FULL_SYSTEM_PROMPT_INTERVAL = 15
+
+        if self.tool_call_counter == 0 or not self._optimize_tool_definitions:
+            messages_to_send = [self.system_prompt] + copy.deepcopy(limited_history)
+        elif self._optimize_tool_definitions and self.tool_call_counter % _FULL_SYSTEM_PROMPT_INTERVAL == 0:
+            logger.debug("Re-injecting full system prompt (turn %d)", self.tool_call_counter)
+            messages_to_send = [self.system_prompt] + copy.deepcopy(limited_history)
+        else:
+            if self.system_prompt_lite is None:
+                self.system_prompt_lite = await self._build_system_prompt_lite()
+            messages_to_send = [self.system_prompt_lite] + copy.deepcopy(limited_history)
 
         # Inject device state and screenshot into the copy (not the original)
         user_indices = [
@@ -319,11 +367,18 @@ class FastAgent(Workflow):
             # Current device state → last user message
             current_state = self.shared_state.formatted_device_state.strip()
             if current_state:
-                messages_to_send[last_user_idx].blocks.append(
-                    TextBlock(
-                        text=f"\n<device_state>\n{current_state}\n</device_state>\n"
+                current_hash = state_hash(current_state)
+                if current_hash != self._last_injected_state_hash:
+                    messages_to_send[last_user_idx].blocks.append(
+                        TextBlock(
+                            text=f"\n<device_state>\n{current_state}\n</device_state>\n"
+                        )
                     )
-                )
+                    self._last_injected_state_hash = current_hash
+                else:
+                    messages_to_send[last_user_idx].blocks.append(
+                        TextBlock(text="\n<device_state_unchanged/>\n")
+                    )
 
             # Screenshot → last user message
             if self.vision and screenshot:
@@ -332,17 +387,6 @@ class FastAgent(Workflow):
                 messages_to_send[last_user_idx].blocks.append(
                     ImageBlock(image=screenshot)
                 )
-
-            # Previous device state → second-to-last user message
-            if len(user_indices) >= 2:
-                second_last_idx = user_indices[-2]
-                prev_state = self.shared_state.previous_formatted_device_state.strip()
-                if prev_state:
-                    messages_to_send[second_last_idx].blocks.append(
-                        TextBlock(
-                            text=f"\n<previous_device_state>\n{prev_state}\n</previous_device_state>\n"
-                        )
-                    )
 
         # Call LLM
         logger.info("FastAgent response:", extra={"color": "yellow"})

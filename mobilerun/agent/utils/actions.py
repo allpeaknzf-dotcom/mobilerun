@@ -596,3 +596,46 @@ async def type_secret(
             success=False,
             summary=f"Failed to type secret '{secret_id}': not found. Available: {available}",
         )
+
+# ---------------------------------------------------------------------------
+# Web-specific actions
+# ---------------------------------------------------------------------------
+
+
+async def open_app_web(text: str, ctx: "ActionContext") -> ActionResult:
+    """Web-specific open_app: URL resolution + navigation."""
+    from urllib.parse import urlparse
+
+    from mobilerun.tools.driver.web import _resolve_url
+
+    url = _resolve_url(text)
+    try:
+        result = await ctx.driver.start_app(url)
+        # App Card integration (domain match)
+        domain = urlparse(url).netloc
+        if hasattr(ctx, "_app_card_provider") and ctx._app_card_provider:
+            card = await ctx._app_card_provider.load_app_card(
+                identifier=domain,
+                instruction=ctx.shared_state.instruction,
+                platform="web",
+            )
+            if card:
+                ctx.shared_state.app_card = card
+        return ActionResult(success=True, summary=result)
+    except Exception as e:
+        return ActionResult(success=False, summary=f"Navigation failed: {e}")
+
+
+async def scroll(
+    direction: str, amount: int = 300, *, ctx: "ActionContext"
+) -> ActionResult:
+    """Scroll the web page up or down."""
+    if direction not in ("up", "down"):
+        return ActionResult(
+            success=False, summary="direction must be 'up' or 'down'"
+        )
+    try:
+        await ctx.driver.scroll(direction, amount)
+        return ActionResult(success=True, summary=f"Scrolled {direction}")
+    except Exception as e:
+        return ActionResult(success=False, summary=f"Scroll failed: {e}")

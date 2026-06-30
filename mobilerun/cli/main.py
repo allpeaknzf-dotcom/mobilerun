@@ -120,6 +120,11 @@ async def run_command(
     device_id: str | None = None,
     save_trajectory: str | None = None,
     ios: bool = False,
+    platform: str | None = None,
+    web_url: str | None = None,
+    web_device: str | None = None,
+    web_browser: str | None = None,
+    web_headless: bool | None = None,
     temperature: float | None = None,
     **kwargs,
 ) -> bool:
@@ -230,6 +235,17 @@ async def run_command(
                 logger.info("🔍 Searching for iOS portal...")
                 config.device.serial = await discover_ios_portal()
 
+        if platform == "web":
+            config.device.platform = "web"
+            if web_url:
+                config.web.start_url = web_url
+            if web_device:
+                config.web.device_profile = web_device
+            if web_browser:
+                config.web.browser_type = web_browser
+            if web_headless is not None:
+                config.web.headless = web_headless
+
         # ================================================================
         # STEP 2: Initialize MobileAgent with config
         # ================================================================
@@ -323,7 +339,7 @@ async def run_command(
 async def _cleanup_android_keyboard(config: MobileConfig) -> None:
     platform = (config.device.platform or "").lower()
     control_backend = (config.device.control_backend or "").lower()
-    if platform == "ios" or control_backend == VISUAL_REMOTE_CONNECTION:
+    if platform in ("ios", "web") or control_backend == VISUAL_REMOTE_CONNECTION:
         return
 
     try:
@@ -511,6 +527,11 @@ except Exception:
     help="Trajectory saving level: none (no saving), step (save per step), action (save per action)",
     default=None,
 )
+@click.option("--platform", type=click.Choice(["android", "ios", "web"]), default=None, help="Target platform (android/ios/web)")
+@click.option("--web-url", default=None, help="Starting URL for web platform")
+@click.option("--web-device", default=None, help="Playwright device profile (e.g. iPhone 15 Pro)")
+@click.option("--web-browser", type=click.Choice(["chromium", "firefox", "webkit"]), default=None, help="Browser engine for web platform")
+@click.option("--web-headless/--no-web-headless", default=None, help="Run browser in headless mode")
 @click.option("--ios", is_flag=True, default=False, help="Run on iOS device")
 @coro
 async def run(
@@ -535,6 +556,11 @@ async def run(
     device_id: str | None,
     save_trajectory: str | None,
     ios: bool,
+    platform: str | None,
+    web_url: str | None,
+    web_device: str | None,
+    web_browser: str | None,
+    web_headless: bool | None,
 ):
     """Run a command on your mobile device using natural language."""
 
@@ -560,6 +586,11 @@ async def run(
         temperature=temperature,
         save_trajectory=save_trajectory,
         ios=ios,
+        platform=platform,
+        web_url=web_url,
+        web_device=web_device,
+        web_browser=web_browser,
+        web_headless=web_headless,
     )
 
     # Exit with appropriate code
@@ -1126,6 +1157,11 @@ async def test(
     save_trajectory: str | None = None,
     temperature: float | None = None,
     ios: bool = False,
+    platform: str | None = None,
+    web_url: str | None = None,
+    web_device: str | None = None,
+    web_browser: str | None = None,
+    web_headless: bool | None = None,
 ):
     config = ConfigLoader.load(config_path)
 
@@ -1175,6 +1211,17 @@ async def test(
         # Platform overrides
         if ios:
             config.device.platform = "ios"
+
+        if platform == "web":
+            config.device.platform = "web"
+            if web_url:
+                config.web.start_url = web_url
+            if web_device:
+                config.web.device_profile = web_device
+            if web_browser:
+                config.web.browser_type = web_browser
+            if web_headless is not None:
+                config.web.headless = web_headless
 
         # ================================================================
         # STEP 2: Initialize MobileAgent with config

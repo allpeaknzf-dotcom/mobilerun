@@ -19,6 +19,7 @@ class LLMProfile:
     provider: str = "GoogleGenAI"
     model: str = "gemini-3.1-flash-lite"
     temperature: float = 0.2
+    api_key: Optional[str] = None
     api_key_source: Literal["auto", "env", "file"] = "auto"
     base_url: Optional[str] = None
     api_base: Optional[str] = None
@@ -44,6 +45,10 @@ class LLMProfile:
         result.update(self.kwargs)
         # OAuth providers handle auth via credential files, not API keys.
         if self.auth_mode == "oauth":
+            return result
+        # Config-file api_key takes priority over env-var resolution.
+        if self.api_key:
+            result["api_key"] = self.api_key
             return result
         # Look up by provider name first (works for GoogleGenAI, Anthropic, etc.).
         # Fall back to provider_family for transport-wrapped providers like
@@ -116,6 +121,9 @@ class AgentConfig:
     after_sleep_action: float = 1.0
     wait_for_stable_ui: float = 0.3
     use_normalized_coordinates: bool = False
+    optimize_tool_definitions: bool = False
+    # ^ Phase1: 是否优化工具定义注入。默认 false（兼容旧行为，每轮注入）。
+    #   设为 true 时只在首轮 + 每 15 轮注入完整工具定义。
 
     fast_agent: FastAgentConfig = field(default_factory=FastAgentConfig)
     manager: ManagerConfig = field(default_factory=ManagerConfig)
@@ -143,12 +151,34 @@ class DeviceConfig:
     control_backend: Optional[str] = None
     device_id: str = "auto"
     use_tcp: bool = False
-    platform: str = "android"  # "android" or "ios"
+    platform: str = "android"  # "android", "ios", or "web"
     auto_setup: bool = True  # auto-install/fix portal before each run
+
+
+
+@dataclass
+class WebConfig:
+    """Web platform configuration."""
+
+    headless: bool = True
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    device_profile: Optional[str] = None
+    user_agent: Optional[str] = None
+    start_url: str = "about:blank"
+    browser_type: str = "chromium"
+    stealth: bool = False
+    timeout_ms: int = 30000
+    locale: str = "zh-CN"
+    wechat_mock: bool = False
+    geolocation: Optional[dict] = None
+    cookies: list = field(default_factory=list)
+    local_storage: dict = field(default_factory=dict)
 
 
 @dataclass
 class TelemetryConfig:
+
     """Telemetry configuration."""
 
     enabled: bool = True
@@ -196,6 +226,11 @@ class ToolsConfig:
 
     disabled_tools: Optional[List[str]] = None
     stealth: bool = False
+    # PEL (Page Element Layer): 启用页面元素层 —— 结构指纹缓存 + 语义化
+    # page_action 工具 + 自动发现。默认 False（关闭时行为与未接入完全一致，
+    # 零退化）。开启后 CachedStateProvider 包装 state_provider，并注册
+    # page_action 工具。
+    pel_enabled: bool = False
 
 
 @dataclass
@@ -220,6 +255,7 @@ class MobileConfig:
     credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
     external_agents: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
     def __post_init__(self):
         """Ensure default profiles exist."""
@@ -327,6 +363,9 @@ class MobileConfig:
             use_normalized_coordinates=agent_data.get(
                 "use_normalized_coordinates", False
             ),
+            optimize_tool_definitions=agent_data.get(
+                "optimize_tool_definitions", False
+            ),
             fast_agent=fast_agent_config,
             manager=manager_config,
             executor=executor_config,
@@ -368,6 +407,7 @@ class MobileConfig:
             credentials=CredentialsConfig(**(data.get("credentials") or {})),
             external_agents=external_agents,
             mcp=mcp_config,
+            web=WebConfig(**(data.get("web") or {})),
         )
 
     @classmethod

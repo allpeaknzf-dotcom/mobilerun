@@ -47,38 +47,38 @@ class CompositeAppCardProvider(AppCardProvider):
         )
         self.local_provider = LocalAppCardProvider(app_cards_dir=app_cards_dir)
 
-    async def load_app_card(self, package_name: str, instruction: str = "") -> str:
+    async def load_app_card(self, identifier: str, instruction: str = "", platform: str = "android") -> str:
         """
         Load app card with server-first, local-fallback strategy.
 
         Args:
-            package_name: Android package name (e.g., "com.google.android.gm")
+            identifier: package_name (Android), bundle_id (iOS), or domain (Web)
             instruction: User instruction/goal
 
         Returns:
             App card content from server or local, or empty string if both fail
         """
-        if not package_name:
+        if not identifier:
             return ""
 
         # Try server first
         server_result = await self.server_provider.load_app_card(
-            package_name, instruction
+            identifier, instruction
         )
 
         if server_result:
             return server_result
 
         # Server failed or returned empty, try local
-        logger.debug(f"Composite provider: falling back to local for {package_name}")
+        logger.debug(f"Composite provider: falling back to local for {identifier}")
         local_result = await self.local_provider.load_app_card(
-            package_name, instruction
+            identifier, instruction
         )
 
         if local_result:
-            logger.debug(f"Composite provider: using local fallback for {package_name}")
+            logger.debug(f"Composite provider: using local fallback for {identifier}")
         else:
-            logger.debug(f"Composite provider: no app card found for {package_name}")
+            logger.debug(f"Composite provider: no app card found for {identifier}")
 
         return local_result
 

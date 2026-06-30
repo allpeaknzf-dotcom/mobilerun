@@ -66,6 +66,7 @@ from mobilerun.config_manager.config_manager import (
     TelemetryConfig,
     ToolsConfig,
     TracingConfig,
+    WebConfig,
 )
 from mobilerun.credential_manager import CredentialManager, FileCredentialManager
 from mobilerun.log_handlers import CLILogHandler, configure_logging
@@ -82,6 +83,12 @@ from mobilerun.telemetry import (
 from mobilerun.tools.driver.ios import IOSDriver, discover_ios_portal
 from mobilerun.tools.driver.recording import RecordingDriver
 from mobilerun.tools.driver.stealth import StealthDriver
+from mobilerun.tools.driver.web import WebDriver
+from mobilerun.tools.ui.web_provider import WebStateProvider
+from mobilerun.tools.ui.cached_provider import CachedStateProvider
+from mobilerun.element.cache import ElementCache
+from mobilerun.element.resolver import LocatorResolver
+from mobilerun.pages.registry import PageRegistry
 from mobilerun.tools.driver.visual_remote import (
     VISUAL_REMOTE_CONNECTION,
     VISUAL_REMOTE_DEFAULT_URL,
@@ -249,6 +256,7 @@ class MobileAgent(Workflow):
             credentials=config.credentials if config else CredentialsConfig(),
             external_agents=config.external_agents if config else {},
             mcp=config.mcp if config else MCPConfig(),
+            web=config.web if config else WebConfig(),
         )
         control_backend = _normalize_control_backend(
             self.resolved_device_config.control_backend
@@ -478,6 +486,7 @@ class MobileAgent(Workflow):
             )
 
         is_ios = self.resolved_device_config.platform.lower() == "ios"
+        is_web = self.resolved_device_config.platform.lower() == "web"
         control_backend = _normalize_control_backend(
             self.resolved_device_config.control_backend
         )
@@ -505,7 +514,24 @@ class MobileAgent(Workflow):
             ios_url = self.resolved_device_config.serial
             if not ios_url:
                 ios_url = await discover_ios_portal()
-            driver = IOSDriver(url=ios_url)
+        elif is_web:
+            web_cfg = self.config.web
+            driver = WebDriver(
+                headless=web_cfg.headless,
+                viewport_width=web_cfg.viewport_width,
+                viewport_height=web_cfg.viewport_height,
+                device_profile=web_cfg.device_profile,
+                user_agent=web_cfg.user_agent,
+                locale=web_cfg.locale,
+                start_url=web_cfg.start_url,
+                browser_type=web_cfg.browser_type,
+                stealth=web_cfg.stealth,
+                timeout_ms=web_cfg.timeout_ms,
+                geolocation=web_cfg.geolocation,
+                cookies=web_cfg.cookies,
+                local_storage=web_cfg.local_storage,
+                wechat_mock=web_cfg.wechat_mock,
+            )
             await driver.connect()
         else:
             device_serial = self.resolved_device_config.serial
@@ -528,11 +554,11 @@ class MobileAgent(Workflow):
 
         # Wrap with StealthDriver if stealth mode enabled
         stealth_enabled = self.config.tools and self.config.tools.stealth
-        if stealth_enabled and not is_ios and not is_visual_remote:
+        if stealth_enabled and not is_ios and not is_visual_remote and not is_web:
             driver = StealthDriver(driver)
 
         # Wrap with RecordingDriver if trajectory saving enabled
-        if self.config.logging.save_trajectory != "none":
+        if self.config.logging.save_trajectory != "none" and not is_web:
             if not isinstance(driver, RecordingDriver):
                 driver = RecordingDriver(driver)
 
@@ -550,6 +576,12 @@ class MobileAgent(Workflow):
                 use_normalized=self.config.agent.use_normalized_coordinates,
                 vision_enabled=vision_enabled,
             )
+        elif is_web:
+            self.state_provider = WebStateProvider(
+                driver=driver,
+                use_normalized=self.config.agent.use_normalized_coordinates,
+                vision_enabled=vision_enabled,
+            )
         else:
             tree_filter = ConciseFilter() if vision_enabled else DetailedFilter()
             tree_formatter = IndexedFormatter()
@@ -562,17 +594,51 @@ class MobileAgent(Workflow):
                 vision_enabled=vision_enabled,
             )
 
+        # ── 2b. PEL (Page Element Layer) — 可选增强 ───────────────────
+        # 默认关闭；开启后用 CachedStateProvider 装饰原始 provider，并创建
+        # PageRegistry / ElementCache / LocatorResolver 注入 ActionContext。
+        pel_enabled = bool(self.config.tools and self.config.tools.pel_enabled)
+        page_registry = None
+        locator_resolver = None
+        element_cache = None
+        if pel_enabled:
+            try:
+                element_cache = ElementCache()
+                page_registry = PageRegistry()
+                page_registry.load_python_pages(driver.platform.lower())  # 手动 PageObject 类
+                page_registry.load_yaml_pages()  # 加载 .mobilerun/pages/*.yaml
+                locator_resolver = LocatorResolver(
+                    driver=driver,
+                    state_provider=self.state_provider,
+                    cache=element_cache,
+                )
+                self.state_provider = CachedStateProvider(
+                    inner_provider=self.state_provider,
+                    cache=element_cache,
+                    registry=page_registry,
+                    locator_resolver=locator_resolver,
+                )
+                # resolver 必须读包装后的 provider，否则 text/spatial 绕开 PEL
+                # 缓存，且与 Phase A 重试刷新的 provider 不在同一状态源上。
+                locator_resolver.attach_state_provider(self.state_provider)
+                logger.info("🧩 PEL enabled (Page Element Layer cache active)")
+            except Exception as e:  # noqa: BLE001 — PEL 故障不应阻断启动
+                logger.warning("Failed to enable PEL, continuing without it: %s", e)
+                pel_enabled = False
+                page_registry = locator_resolver = element_cache = None
+
         # ── 3. Build tool registry ────────────────────────────────────
         registry, standard_tool_names = await build_tool_registry(
             supported_buttons=driver.supported_buttons,
             credential_manager=self.credential_manager,
-            platform="ios" if driver.platform.lower() == "ios" else "android",
+            platform=driver.platform.lower(),
             exact_app_launch=is_visual_remote,
             screenshot_only=getattr(
                 self.state_provider,
                 "requires_coordinate_tools",
                 False,
             ),
+            pel_enabled=pel_enabled,
         )
 
         # User custom tools
@@ -630,6 +696,10 @@ class MobileAgent(Workflow):
             credential_manager=self.credential_manager,
             streaming=self.config.agent.streaming,
             macro_recorder=self.macro_recorder,
+            # PEL 组件（未启用时均为 None）
+            page_registry=page_registry,
+            locator_resolver=locator_resolver,
+            element_cache=element_cache,
         )
 
         # ── 5. Wire up sub-agents ─────────────────────────────────────

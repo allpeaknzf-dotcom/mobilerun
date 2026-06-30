@@ -11,7 +11,9 @@ from mobilerun.agent.utils.actions import (
     long_press,
     long_press_at,
     open_app,
+    open_app_web,
     open_bundle_id,
+    scroll,
     swipe,
     system_button,
     type_secret,
@@ -19,6 +21,7 @@ from mobilerun.agent.utils.actions import (
     type_text_direct,
     wait,
 )
+from mobilerun.agent.utils.page_actions import page_action
 
 logger = logging.getLogger("mobilerun")
 
@@ -29,6 +32,7 @@ async def build_tool_registry(
     platform: str = "android",
     exact_app_launch: bool = False,
     screenshot_only: bool = False,
+    pel_enabled: bool = False,
 ) -> tuple[ToolRegistry, set[str]]:
     """Build a ToolRegistry with all standard mobilerun tools.
 
@@ -246,6 +250,25 @@ async def build_tool_registry(
         ),
     )
 
+    # -- Web scroll tool (conditional) ----------------------------------------
+
+    if platform.lower() == "web":
+        registry.register(
+            "scroll",
+            fn=scroll,
+            params={
+                "direction": {"type": "string", "required": True},
+                "amount": {"type": "number", "required": False, "default": 300},
+            },
+            description=(
+                "Scroll the page up or down. "
+                "direction: 'up' or 'down'. amount: pixels to scroll (default: 300). "
+                'Usage: {"action": "scroll", "direction": "down"}'
+            ),
+            deps={"scroll"},
+        )
+        # scroll added to standard_tool_names below
+
     # -- App / state / flow control ------------------------------------------
 
     if exact_app_launch:
@@ -257,6 +280,18 @@ async def build_tool_registry(
                 "Open an app by exact app identifier. Use the package name or "
                 "bundle identifier required by the current device backend. "
                 'Usage: {"action": "open_app", "app_id": "com.example.app"}'
+            ),
+            deps={"start_app"},
+        )
+    elif platform.lower() == "web":
+        registry.register(
+            "open_app",
+            fn=open_app_web,
+            params={"text": {"type": "string", "required": True}},
+            description=(
+                "Navigate to a URL or web application. Accepts full URLs "
+                "(https://...) or domain names. "
+                'Usage: {"action": "open_app", "text": "https://github.com"}'
             ),
             deps={"start_app"},
         )
@@ -296,6 +331,37 @@ async def build_tool_registry(
             "message contains the result, answer, or explanation."
         ),
     )
+
+    # -- PEL: page_action (conditional, all platforms) -----------------------
+
+    if pel_enabled:
+        registry.register(
+            "page_action",
+            fn=page_action,
+            params={
+                "action": {"type": "string", "required": True},
+                "element": {"type": "string", "required": False, "default": ""},
+                "value": {"type": "string", "required": False, "default": ""},
+                "invalidate_after": {
+                    "type": "array",
+                    "required": False,
+                    "default": None,
+                },
+            },
+            description=(
+                "Semantic page operation with multi-strategy element location. "
+                "Prefer this over click(index=N): it uses cached coordinates when "
+                "available and falls back to CSS/text/spatial automatically, making "
+                "it faster and more reliable. "
+                "action: 'click' | 'type' | 'scroll_to' | 'wait_for' | 'verify'. "
+                "element: semantic name of the element (e.g. '登录按钮'). "
+                "value: text to type (required for action='type'). "
+                "invalidate_after: optional list of element names whose cache is "
+                "cleared after the action (AJAX refresh compensation). "
+                'Usage: {"action": "page_action", "action": "click", "element": "登录按钮"}'
+            ),
+            deps={"tap", "input_text", "element_index"},
+        )
 
     standard_tool_names = set(registry.tools.keys())
 

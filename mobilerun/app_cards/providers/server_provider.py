@@ -31,28 +31,28 @@ class ServerAppCardProvider(AppCardProvider):
         self.max_retries = max_retries
         self._content_cache: Dict[tuple[str, str], str] = {}
 
-    async def load_app_card(self, package_name: str, instruction: str = "") -> str:
+    async def load_app_card(self, identifier: str, instruction: str = "", platform: str = "android") -> str:
         """
         Load app card from remote server.
 
         Args:
-            package_name: Android package name (e.g., "com.google.android.gm")
+            identifier: package_name (Android), bundle_id (iOS), or domain (Web)
             instruction: User instruction/goal (sent to server for context)
 
         Returns:
             App card content or empty string if not found or on error
         """
-        if not package_name:
+        if not identifier:
             return ""
 
         # Check content cache first (key: package_name, instruction)
-        cache_key = (package_name, instruction)
+        cache_key = (identifier, instruction)
         if cache_key in self._content_cache:
             return self._content_cache[cache_key]
 
         # Make HTTP request with retries
         endpoint = f"{self.server_url}/app-cards"
-        payload = {"package_name": package_name, "instruction": instruction}
+        payload = {"identifier": identifier, "platform": platform, "instruction": instruction}
 
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -74,19 +74,19 @@ class ServerAppCardProvider(AppCardProvider):
 
                     else:
                         logger.warning(
-                            f"Server returned status {response.status_code} for {package_name} "
+                            f"Server returned status {response.status_code} for {identifier} "
                             f"(attempt {attempt}/{self.max_retries})"
                         )
 
             except httpx.TimeoutException:
                 logger.warning(
-                    f"Server request timeout for {package_name} "
+                    f"Server request timeout for {identifier} "
                     f"(attempt {attempt}/{self.max_retries})"
                 )
 
             except httpx.RequestError as e:
                 logger.warning(
-                    f"Server request failed for {package_name}: {e} "
+                    f"Server request failed for {identifier}: {e} "
                     f"(attempt {attempt}/{self.max_retries})"
                 )
 
