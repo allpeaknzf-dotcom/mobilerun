@@ -42,6 +42,7 @@ from mobilerun.agent.fast_agent.xml_parser import (
 )
 from mobilerun.agent.usage import get_usage_from_response
 from mobilerun.agent.utils.chat_utils import limit_history
+from mobilerun.agent.utils.context_hasher import state_hash
 from mobilerun.agent.utils.inference import acall_with_retries
 from mobilerun.agent.utils.prompt_resolver import PromptResolver
 from mobilerun.agent.utils.tracing_setup import record_langfuse_screenshot
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("mobilerun")
 
 _MALFORMED_TOOL_CALL_LIMIT = 3
+_FULL_SYSTEM_PROMPT_INTERVAL = 15
 
 
 def _malformed_tool_call_correction(attempt: int) -> str:
@@ -126,8 +128,13 @@ class FastAgent(Workflow):
         self.tracing_config = tracing_config
 
         self.system_prompt: ChatMessage | None = None
+        self.system_prompt_lite: ChatMessage | None = None
         self.tool_call_counter = 0
         self._consecutive_malformed_tool_calls = 0
+        self._optimize_tool_definitions = getattr(
+            agent_config, "optimize_tool_definitions", False
+        )
+        self._last_injected_state_hash = ""
 
         # Build tool descriptions and param types from registry
         self.tool_descriptions = self.registry.get_tool_descriptions_xml()
@@ -171,6 +178,55 @@ class FastAgent(Workflow):
             )
         return ChatMessage(role="system", content=system_text)
 
+    async def _build_system_prompt_lite(self) -> ChatMessage:
+        """Build a system prompt without repeating full tool definitions."""
+        template_context = {
+            "tool_descriptions": (
+                "<functions>Use the tool names and parameters established earlier "
+                "in this task.</functions>"
+            ),
+            "available_secrets": self._available_secrets,
+            "available_tools": set(self.registry.tools.keys()),
+            "variables": (
+                self.shared_state.custom_variables if self.shared_state else {}
+            ),
+            "output_schema": self._output_schema,
+            "parallel_tools": self.config.parallel_tools,
+            "vision": self.vision,
+            "platform": self.shared_state.platform,
+            "screenshot_only": bool(
+                getattr(self.state_provider, "requires_coordinate_tools", False)
+            ),
+        }
+
+        custom_system_prompt = self.prompt_resolver.get_prompt("fast_agent_system")
+        if custom_system_prompt:
+            system_text = PromptLoader.render_template(
+                custom_system_prompt,
+                template_context,
+            )
+        else:
+            system_text = await PromptLoader.load_prompt(
+                self.agent_config.get_fast_agent_system_prompt_path(),
+                template_context,
+            )
+        return ChatMessage(role="system", content=system_text)
+
+    def _use_full_system_prompt(self) -> bool:
+        return (
+            not self._optimize_tool_definitions
+            or self.tool_call_counter == 0
+            or self.tool_call_counter % _FULL_SYSTEM_PROMPT_INTERVAL == 0
+        )
+
+    def _device_state_context(self, current_state: str) -> str:
+        current_hash = state_hash(current_state)
+        if current_hash == self._last_injected_state_hash:
+            return "\n<device_state_unchanged/>\n"
+
+        self._last_injected_state_hash = current_hash
+        return f"\n<device_state>\n{current_state}\n</device_state>\n"
+
     async def _build_user_prompt(self, goal: str) -> ChatMessage:
         """Build initial user prompt message."""
         custom_user_prompt = self.prompt_resolver.get_prompt("fast_agent_user")
@@ -201,6 +257,7 @@ class FastAgent(Workflow):
         """Initialize message history with goal."""
         logger.debug("Preparing chat for task execution...")
         self._consecutive_malformed_tool_calls = 0
+        self._last_injected_state_hash = ""
 
         # Get available secrets (only if type_secret is actually in the registry)
         if (
@@ -216,6 +273,8 @@ class FastAgent(Workflow):
         # Build system prompt (lazy load)
         if self.system_prompt is None:
             self.system_prompt = await self._build_system_prompt()
+        if self._optimize_tool_definitions and self.system_prompt_lite is None:
+            self.system_prompt_lite = await self._build_system_prompt_lite()
 
         # Get goal and build user message
         user_input = ev.get("input", default=None)
@@ -323,7 +382,14 @@ class FastAgent(Workflow):
             LLM_HISTORY_LIMIT * 2,
             preserve_first=True,
         )
-        messages_to_send = [self.system_prompt] + copy.deepcopy(limited_history)
+        if self._use_full_system_prompt():
+            selected_system_prompt = self.system_prompt
+        else:
+            if self.system_prompt_lite is None:
+                self.system_prompt_lite = await self._build_system_prompt_lite()
+            selected_system_prompt = self.system_prompt_lite
+
+        messages_to_send = [selected_system_prompt] + copy.deepcopy(limited_history)
 
         # Inject device state and screenshot into the copy (not the original)
         user_indices = [
@@ -343,9 +409,7 @@ class FastAgent(Workflow):
             current_state = self.shared_state.formatted_device_state.strip()
             if current_state:
                 messages_to_send[last_user_idx].blocks.append(
-                    TextBlock(
-                        text=f"\n<device_state>\n{current_state}\n</device_state>\n"
-                    )
+                    TextBlock(text=self._device_state_context(current_state))
                 )
 
             # Screenshot → last user message
@@ -357,17 +421,6 @@ class FastAgent(Workflow):
                 messages_to_send[last_user_idx].blocks.append(
                     ImageBlock(image=screenshot)
                 )
-
-            # Previous device state → second-to-last user message
-            if len(user_indices) >= 2:
-                second_last_idx = user_indices[-2]
-                prev_state = self.shared_state.previous_formatted_device_state.strip()
-                if prev_state:
-                    messages_to_send[second_last_idx].blocks.append(
-                        TextBlock(
-                            text=f"\n<previous_device_state>\n{prev_state}\n</previous_device_state>\n"
-                        )
-                    )
 
         # Call LLM
         logger.info("FastAgent response:", extra={"color": "yellow"})

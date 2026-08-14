@@ -42,6 +42,7 @@ from mobilerun.agent.manager.prompts import (
 )
 from mobilerun.agent.usage import get_usage_from_response
 from mobilerun.agent.utils.chat_utils import filter_empty_messages
+from mobilerun.agent.utils.context_hasher import state_hash
 from mobilerun.agent.utils.inference import acall_with_retries
 from mobilerun.agent.utils.prompt_resolver import PromptResolver
 from mobilerun.agent.utils.tracing_setup import record_langfuse_screenshot
@@ -113,6 +114,7 @@ class ManagerAgent(Workflow):
         self.prompt_resolver = prompt_resolver or PromptResolver()
         self.tracing_config = tracing_config
         self.standard_tool_names: set[str] | None = None
+        self._last_injected_state_hash = ""
 
         # Initialize app card provider
         self.app_card_provider: AppCardProvider = self._initialize_app_card_provider()
@@ -251,6 +253,14 @@ class ManagerAgent(Workflow):
 
         return "".join(parts)
 
+    def _device_state_context(self, current_state: str) -> str:
+        current_hash = state_hash(current_state)
+        if current_hash == self._last_injected_state_hash:
+            return "\n<device_state_unchanged/>\n"
+
+        self._last_injected_state_hash = current_hash
+        return f"\n<device_state>\n{current_state}\n</device_state>\n"
+
     def _build_messages_with_context(
         self, system_prompt: str, screenshot: bytes | None = None
     ) -> list[ChatMessage]:
@@ -290,9 +300,7 @@ class ManagerAgent(Workflow):
             current_state = self.shared_state.formatted_device_state.strip()
             if current_state:
                 messages[last_user_idx].blocks.append(
-                    TextBlock(
-                        text=f"\n<device_state>\n{current_state}\n</device_state>\n"
-                    )
+                    TextBlock(text=self._device_state_context(current_state))
                 )
 
             # Add screenshot if vision enabled
@@ -302,17 +310,6 @@ class ManagerAgent(Workflow):
                         self.state_provider, screenshot
                     )
                 messages[last_user_idx].blocks.append(ImageBlock(image=screenshot))
-
-            # Add previous device state to second-to-last user message
-            if len(user_indices) >= 2:
-                second_last_idx = user_indices[-2]
-                prev_state = self.shared_state.previous_formatted_device_state.strip()
-                if prev_state:
-                    messages[second_last_idx].blocks.append(
-                        TextBlock(
-                            text=f"\n<previous_device_state>\n{prev_state}\n</previous_device_state>\n"
-                        )
-                    )
 
         messages = filter_empty_messages(messages)
         return messages

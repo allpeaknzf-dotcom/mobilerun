@@ -102,7 +102,9 @@ class StatelessManagerAgent(Workflow):
             "platform": self.shared_state.platform,
             "device_date": self.shared_state.device_date,
             "previous_plan": self.shared_state.previous_plan,
-            "previous_state": self.shared_state.previous_formatted_device_state,
+            "previous_state": getattr(
+                self.shared_state, "previous_formatted_device_state", ""
+            ),
             "memory": self.shared_state.agent_memory,
             "last_thought": self.shared_state.last_thought,
             "progress_summary": self.shared_state.progress_summary,
