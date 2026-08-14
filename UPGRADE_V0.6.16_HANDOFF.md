@@ -11,6 +11,11 @@ Date: 2026-08-14
 - Backup branch: `backup/pel-before-v0.6.16`
 - The stable branch has not been modified by this integration.
 - Do not merge into the stable branch automatically.
+- Pushed `codex/integrate-v0.6.16` to the user fork:
+  `https://github.com/allpeaknzf-dotcom/mobilerun.git`
+- Push to official `droidrun/mobilerun.git` was denied with 403 by the
+  current GitHub credential (`allpeaknzf-dotcom`). This needs permissions or
+  a user-initiated PR.
 
 ## Completed
 
