@@ -163,5 +163,5 @@ def test_v7_migration_only_converts_the_old_canonical_manager_prompt_path(
 
     migrated = migrate(config)
 
-    assert migrated["_version"] == CURRENT_VERSION == 7
+    assert migrated["_version"] == CURRENT_VERSION == 8
     assert migrated["agent"]["manager"]["system_prompt"] == expected_prompt

@@ -31,6 +31,9 @@ class ActionContext:
         credential_manager: "Optional[CredentialManager]" = None,
         streaming: bool = False,
         macro_recorder: "Optional[MacroRecorder]" = None,
+        page_registry=None,
+        locator_resolver=None,
+        element_cache=None,
     ) -> None:
         self.driver = driver
         self.ui = ui  # refreshed each step before tool execution
@@ -40,3 +43,6 @@ class ActionContext:
         self.credential_manager = credential_manager
         self.streaming = streaming
         self.macro_recorder = macro_recorder
+        self.page_registry = page_registry
+        self.locator_resolver = locator_resolver
+        self.element_cache = element_cache

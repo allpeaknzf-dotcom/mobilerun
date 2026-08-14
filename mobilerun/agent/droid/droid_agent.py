@@ -18,6 +18,18 @@ from llama_index.core.workflow import Context, StartEvent, StopEvent, Workflow, 
 from mobilerun_core_local.driver.android import AndroidDriver
 from mobilerun_core_local.driver.android.portal import ensure_portal_ready
 from mobilerun_core_local.driver.base import DeviceDisconnectedError
+from mobilerun_core_local.driver.ios import (
+    IOSPortalHttpDriver,
+    create_ios_driver,
+    discover_ios_device,
+)
+from mobilerun_core_local.driver.recording import RecordingDriver
+from mobilerun_core_local.driver.stealth import StealthDriver
+from mobilerun_core_local.driver.visual_remote import (
+    VISUAL_REMOTE_CONNECTION,
+    VISUAL_REMOTE_DEFAULT_URL,
+    VisualRemoteDriver,
+)
 from opentelemetry import trace
 from pydantic import BaseModel
 from workflows.events import Event
@@ -68,36 +80,31 @@ from mobilerun.config_manager.config_manager import (
     TelemetryConfig,
     ToolsConfig,
     TracingConfig,
+    WebConfig,
 )
 from mobilerun.credential_manager import CredentialManager, FileCredentialManager
+from mobilerun.element.cache import ElementCache
+from mobilerun.element.resolver import LocatorResolver
 from mobilerun.log_handlers import CLILogHandler, configure_logging
 from mobilerun.macro.recorder import MacroRecorder
 from mobilerun.mcp.adapter import mcp_to_mobilerun_tools
 from mobilerun.mcp.client import MCPClientManager
 from mobilerun.mcp.config import MCPConfig
+from mobilerun.pages.registry import PageRegistry
 from mobilerun.telemetry import (
     MobileAgentFinalizeEvent,
     MobileAgentInitEvent,
     capture,
     flush,
 )
-from mobilerun_core_local.driver.ios import (
-    IOSPortalHttpDriver,
-    create_ios_driver,
-    discover_ios_device,
-)
-from mobilerun_core_local.driver.recording import RecordingDriver
-from mobilerun_core_local.driver.stealth import StealthDriver
-from mobilerun_core_local.driver.visual_remote import (
-    VISUAL_REMOTE_CONNECTION,
-    VISUAL_REMOTE_DEFAULT_URL,
-    VisualRemoteDriver,
-)
+from mobilerun.tools.driver.web import WebDriver
 from mobilerun.tools.filters import ConciseFilter, DetailedFilter
 from mobilerun.tools.formatters import IndexedFormatter
+from mobilerun.tools.ui.cached_provider import CachedStateProvider
 from mobilerun.tools.ui.ios_provider import IOSStateProvider
 from mobilerun.tools.ui.provider import AndroidStateProvider
 from mobilerun.tools.ui.screenshot_provider import ScreenshotOnlyStateProvider
+from mobilerun.tools.ui.web_provider import WebStateProvider
 
 if TYPE_CHECKING:
     from mobilerun_core_local.driver.base import DeviceDriver
@@ -182,9 +189,7 @@ class MobileAgent(Workflow):
         """
         Configure default logging for MobileAgent if no real handler is present.
         """
-        has_real_handler = any(
-            not isinstance(h, logging.NullHandler) for h in logger.handlers
-        )
+        has_real_handler = any(not isinstance(h, logging.NullHandler) for h in logger.handlers)
         if not has_real_handler:
             handler = CLILogHandler()
             handler.setFormatter(
@@ -229,9 +234,7 @@ class MobileAgent(Workflow):
 
         # Load credential manager (supports both config and direct dict)
         credentials_source = (
-            credentials
-            if credentials is not None
-            else (config.credentials if config else None)
+            credentials if credentials is not None else (config.credentials if config else None)
         )
 
         if isinstance(credentials_source, CredentialManager):
@@ -255,10 +258,9 @@ class MobileAgent(Workflow):
             credentials=config.credentials if config else CredentialsConfig(),
             external_agents=config.external_agents if config else {},
             mcp=config.mcp if config else MCPConfig(),
+            web=config.web if config else WebConfig(),
         )
-        control_backend = _normalize_control_backend(
-            self.resolved_device_config.control_backend
-        )
+        control_backend = _normalize_control_backend(self.resolved_device_config.control_backend)
         if (
             self.config.agent.vision_only
             or control_backend == VISUAL_REMOTE_CONNECTION
@@ -309,9 +311,7 @@ class MobileAgent(Workflow):
 
                 logger.debug("🔄 Loading LLMs from config (llms not provided)...")
 
-                llms = load_agent_llms(
-                    config=self.config, output_model=output_model, **kwargs
-                )
+                llms = load_agent_llms(config=self.config, output_model=output_model, **kwargs)
             if isinstance(llms, dict):
                 llms = merge_llms_with_config(
                     self.config, llms, output_model=output_model, **kwargs
@@ -326,9 +326,7 @@ class MobileAgent(Workflow):
                 self.executor_llm = llms.get("executor")
                 self.fast_agent_llm = llms.get("fast_agent")
                 self.app_opener_llm = llms.get("app_opener")
-                self.structured_output_llm = llms.get(
-                    "structured_output", self.fast_agent_llm
-                )
+                self.structured_output_llm = llms.get("structured_output", self.fast_agent_llm)
             else:
                 self.manager_llm = llms
                 self.executor_llm = llms
@@ -343,10 +341,7 @@ class MobileAgent(Workflow):
             self.app_opener_llm = None
             self.structured_output_llm = None
 
-        if (
-            not self._using_external_agent
-            and self.config.logging.save_trajectory != "none"
-        ):
+        if not self._using_external_agent and self.config.logging.save_trajectory != "none":
             self.trajectory = Trajectory(
                 goal=self.shared_state.instruction,
                 base_path=self.config.logging.trajectory_path,
@@ -414,9 +409,7 @@ class MobileAgent(Workflow):
     async def start_handler(
         self, ctx: Context, ev: StartEvent
     ) -> FastAgentExecuteEvent | ManagerInputEvent:
-        logger.info(
-            f"🚀 Running MobileAgent to achieve goal: {self.shared_state.instruction}"
-        )
+        logger.info(f"🚀 Running MobileAgent to achieve goal: {self.shared_state.instruction}")
         ctx.write_event_to_stream(ev)
 
         if self.trajectory_writer:
@@ -479,9 +472,7 @@ class MobileAgent(Workflow):
                 or self.config.agent.executor.vision
             )
         else:
-            vision_enabled = (
-                self.config.agent.vision_only or self.config.agent.fast_agent.vision
-            )
+            vision_enabled = self.config.agent.vision_only or self.config.agent.fast_agent.vision
 
         # Resolve the model-facing screenshot size once, from every vision LLM
         # that will receive a screenshot, so the declared coordinate space equals
@@ -492,13 +483,11 @@ class MobileAgent(Workflow):
                 llm
                 for use, llm in (
                     (
-                        self.config.agent.vision_only
-                        or self.config.agent.manager.vision,
+                        self.config.agent.vision_only or self.config.agent.manager.vision,
                         self.manager_llm,
                     ),
                     (
-                        self.config.agent.vision_only
-                        or self.config.agent.executor.vision,
+                        self.config.agent.vision_only or self.config.agent.executor.vision,
                         self.executor_llm,
                     ),
                 )
@@ -515,9 +504,8 @@ class MobileAgent(Workflow):
         )
 
         is_ios = self.resolved_device_config.platform.lower() == "ios"
-        control_backend = _normalize_control_backend(
-            self.resolved_device_config.control_backend
-        )
+        is_web = self.resolved_device_config.platform.lower() == "web"
+        control_backend = _normalize_control_backend(self.resolved_device_config.control_backend)
         if control_backend and control_backend != VISUAL_REMOTE_CONNECTION:
             raise ValueError(
                 "Unsupported device control backend "
@@ -530,9 +518,7 @@ class MobileAgent(Workflow):
         if self._injected_driver is not None:
             driver = self._injected_driver
         elif is_visual_remote:
-            visual_remote_url = (
-                self.resolved_device_config.serial or VISUAL_REMOTE_DEFAULT_URL
-            )
+            visual_remote_url = self.resolved_device_config.serial or VISUAL_REMOTE_DEFAULT_URL
             driver = VisualRemoteDriver(
                 url=visual_remote_url,
                 device_id=self.resolved_device_config.device_id,
@@ -545,6 +531,25 @@ class MobileAgent(Workflow):
             driver = await create_ios_driver(
                 ios_url,
                 token=self.resolved_device_config.resolve_auth_token(),
+            )
+            await driver.connect()
+        elif is_web:
+            web_cfg = self.config.web
+            driver = WebDriver(
+                headless=web_cfg.headless,
+                viewport_width=web_cfg.viewport_width,
+                viewport_height=web_cfg.viewport_height,
+                device_profile=web_cfg.device_profile,
+                user_agent=web_cfg.user_agent,
+                locale=web_cfg.locale,
+                start_url=web_cfg.start_url,
+                browser_type=web_cfg.browser_type,
+                stealth=web_cfg.stealth,
+                timeout_ms=web_cfg.timeout_ms,
+                geolocation=web_cfg.geolocation,
+                cookies=web_cfg.cookies,
+                local_storage=web_cfg.local_storage,
+                wechat_mock=web_cfg.wechat_mock,
             )
             await driver.connect()
         else:
@@ -570,17 +575,19 @@ class MobileAgent(Workflow):
             )
             await driver.connect()
 
+        is_web = is_web or str(getattr(driver, "platform", "")).lower() == "web"
+
         # Captured before the Stealth/Recording wraps: the provider pairing
         # below must see the concrete driver class.
         is_ios_portal_http = isinstance(driver, IOSPortalHttpDriver)
 
         # Wrap with StealthDriver if stealth mode enabled
         stealth_enabled = self.config.tools and self.config.tools.stealth
-        if stealth_enabled and not is_ios and not is_visual_remote:
+        if stealth_enabled and not is_ios and not is_visual_remote and not is_web:
             driver = StealthDriver(driver)
 
         # Wrap with RecordingDriver if trajectory saving enabled
-        if self.config.logging.save_trajectory != "none":
+        if self.config.logging.save_trajectory != "none" and not is_web:
             if not isinstance(driver, RecordingDriver):
                 driver = RecordingDriver(driver)
 
@@ -615,6 +622,13 @@ class MobileAgent(Workflow):
                 vision_enabled=vision_enabled,
                 vision_resize_policy=vision_resize_policy,
             )
+        elif is_web:
+            self.state_provider = WebStateProvider(
+                driver=driver,
+                use_normalized=self.config.agent.use_normalized_coordinates,
+                vision_enabled=vision_enabled,
+                vision_resize_policy=vision_resize_policy,
+            )
         else:
             tree_filter = ConciseFilter() if vision_enabled else DetailedFilter()
             tree_formatter = IndexedFormatter()
@@ -628,17 +642,47 @@ class MobileAgent(Workflow):
                 vision_resize_policy=vision_resize_policy,
             )
 
+        # ── 2b. Optional Page Element Layer ───────────────────────────
+        pel_enabled = bool(self.config.tools and self.config.tools.pel_enabled)
+        page_registry = None
+        locator_resolver = None
+        element_cache = None
+        if pel_enabled:
+            try:
+                element_cache = ElementCache()
+                page_registry = PageRegistry()
+                page_registry.load_python_pages(driver.platform.lower())
+                page_registry.load_yaml_pages()
+                locator_resolver = LocatorResolver(
+                    driver=driver,
+                    state_provider=self.state_provider,
+                    cache=element_cache,
+                )
+                self.state_provider = CachedStateProvider(
+                    inner_provider=self.state_provider,
+                    cache=element_cache,
+                    registry=page_registry,
+                    locator_resolver=locator_resolver,
+                )
+                locator_resolver.attach_state_provider(self.state_provider)
+                logger.info("🧩 PEL enabled (Page Element Layer cache active)")
+            except Exception as e:
+                logger.warning("Failed to enable PEL, continuing without it: %s", e)
+                pel_enabled = False
+                page_registry = locator_resolver = element_cache = None
+
         # ── 3. Build tool registry ────────────────────────────────────
         registry, standard_tool_names = await build_tool_registry(
             supported_buttons=driver.supported_buttons,
             credential_manager=self.credential_manager,
-            platform="ios" if driver.platform.lower() == "ios" else "android",
+            platform=driver.platform.lower(),
             exact_app_launch=is_visual_remote,
             screenshot_only=getattr(
                 self.state_provider,
                 "requires_coordinate_tools",
                 False,
             ),
+            pel_enabled=pel_enabled,
         )
 
         # User custom tools
@@ -661,9 +705,7 @@ class MobileAgent(Workflow):
         # default"; an explicit list (even empty) is honored verbatim.
         user_disabled = self.config.tools.disabled_tools if self.config.tools else None
         explicit_disabled = user_disabled is not None
-        disabled_tools = list(
-            user_disabled if explicit_disabled else DEFAULT_DISABLED_TOOLS
-        )
+        disabled_tools = list(user_disabled if explicit_disabled else DEFAULT_DISABLED_TOOLS)
         # In reasoning mode the Executor only sees a screenshot when the Manager
         # also captured one (manager.vision=True), so require both before
         # exposing coordinate clicks.
@@ -696,6 +738,9 @@ class MobileAgent(Workflow):
             credential_manager=self.credential_manager,
             streaming=self.config.agent.streaming,
             macro_recorder=self.macro_recorder,
+            page_registry=page_registry,
+            locator_resolver=locator_resolver,
+            element_cache=element_cache,
         )
 
         # ── 5. Wire up sub-agents ─────────────────────────────────────
@@ -716,21 +761,13 @@ class MobileAgent(Workflow):
             MobileAgentInitEvent(
                 goal=self.shared_state.instruction,
                 llms={
-                    "manager": (
-                        self.manager_llm.class_name() if self.manager_llm else "None"
-                    ),
-                    "executor": (
-                        self.executor_llm.class_name() if self.executor_llm else "None"
-                    ),
+                    "manager": (self.manager_llm.class_name() if self.manager_llm else "None"),
+                    "executor": (self.executor_llm.class_name() if self.executor_llm else "None"),
                     "fast_agent": (
-                        self.fast_agent_llm.class_name()
-                        if self.fast_agent_llm
-                        else "None"
+                        self.fast_agent_llm.class_name() if self.fast_agent_llm else "None"
                     ),
                     "app_opener": (
-                        self.app_opener_llm.class_name()
-                        if self.app_opener_llm
-                        else "None"
+                        self.app_opener_llm.class_name() if self.app_opener_llm else "None"
                     ),
                 },
                 tools=",".join(sorted(standard_tool_names)),
@@ -785,9 +822,7 @@ class MobileAgent(Workflow):
     # ========================================================================
 
     @step
-    async def execute_task(
-        self, ctx: Context, ev: FastAgentExecuteEvent
-    ) -> FastAgentResultEvent:
+    async def execute_task(self, ctx: Context, ev: FastAgentExecuteEvent) -> FastAgentResultEvent:
         """Execute a single task using FastAgent."""
 
         logger.debug(f"🔧 Executing task: {ev.instruction}")
@@ -875,9 +910,7 @@ class MobileAgent(Workflow):
             logger.warning(f"⚠️ Reached maximum steps ({self.config.agent.max_steps})")
             pending = self.shared_state.drain_user_messages()
             if pending:
-                logger.warning(
-                    f"⚠️ Dropping {len(pending)} external user message(s) at max steps"
-                )
+                logger.warning(f"⚠️ Dropping {len(pending)} external user message(s) at max steps")
                 ctx.write_event_to_stream(
                     ExternalUserMessageDroppedEvent(
                         message_ids=[m.id for m in pending],
@@ -891,9 +924,7 @@ class MobileAgent(Workflow):
             )
 
         self.shared_state.step_number += 1
-        logger.info(
-            f"🔄 Step {self.shared_state.step_number}/{self.config.agent.max_steps}"
-        )
+        logger.info(f"🔄 Step {self.shared_state.step_number}/{self.config.agent.max_steps}")
 
         try:
             handler = self.manager_agent.run()
@@ -941,9 +972,7 @@ class MobileAgent(Workflow):
         return ExecutorInputEvent(current_subgoal=ev.current_subgoal)
 
     @step
-    async def run_executor(
-        self, ctx: Context, ev: ExecutorInputEvent
-    ) -> ExecutorResultEvent:
+    async def run_executor(self, ctx: Context, ev: ExecutorInputEvent) -> ExecutorResultEvent:
         """Run Executor action phase."""
         logger.debug("⚡ Running Executor for action...")
 
@@ -1060,11 +1089,7 @@ class MobileAgent(Workflow):
             or self.config.agent.executor.vision
             or self.config.agent.fast_agent.vision
         )
-        if (
-            vision_any
-            or self._stream_screenshots
-            or self.config.logging.save_trajectory != "none"
-        ):
+        if vision_any or self._stream_screenshots or self.config.logging.save_trajectory != "none":
             try:
                 screenshot = await self.action_ctx.driver.screenshot()
                 if screenshot:
@@ -1082,9 +1107,7 @@ class MobileAgent(Workflow):
 
             try:
                 ui_state = await self.state_provider.get_state()
-                ctx.write_event_to_stream(
-                    RecordUIStateEvent(ui_state=ui_state.elements)
-                )
+                ctx.write_event_to_stream(RecordUIStateEvent(ui_state=ui_state.elements))
                 logger.debug("📋 Final UI state captured")
             except Exception as e:
                 logger.warning(f"Failed to capture final UI state: {e}")
@@ -1097,9 +1120,7 @@ class MobileAgent(Workflow):
             elif isinstance(self.driver, RecordingDriver):
                 self.trajectory.macro = list(self.driver.log)
 
-            self.trajectory_writer.write_final(
-                self.trajectory, self.config.logging.trajectory_gifs
-            )
+            self.trajectory_writer.write_final(self.trajectory, self.config.logging.trajectory_gifs)
             await self.trajectory_writer.stop()
             logger.info(f"📁 Trajectory saved: {self.trajectory.trajectory_folder}")
 

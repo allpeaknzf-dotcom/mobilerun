@@ -126,6 +126,7 @@ class AgentConfig:
     after_sleep_action: float = 1.0
     wait_for_stable_ui: float = 0.3
     use_normalized_coordinates: bool = False
+    optimize_tool_definitions: bool = False
     # Optional cap (px, long edge) on the model-facing screenshot size, applied
     # on top of per-model effective-size resolution. Escape hatch for local
     # vision models (e.g. Ollama) that downsize to an undocumented size.
@@ -167,7 +168,7 @@ class DeviceConfig:
     control_backend: Optional[str] = None
     device_id: str = "auto"
     use_tcp: bool = False
-    platform: str = "android"  # "android" or "ios"
+    platform: str = "android"  # "android", "ios", or "web"
     portal_mode: Literal["auto", "required", "disabled"] = "auto"
     auto_setup: bool = True  # auto-install/fix portal before each run
     # Bearer token for portal-HTTP device URLs (a mobilerun-ios --local server
@@ -177,6 +178,26 @@ class DeviceConfig:
 
     def resolve_auth_token(self) -> Optional[str]:
         return os.environ.get("MOBILERUN_DEVICE_TOKEN") or self.auth_token
+
+
+@dataclass
+class WebConfig:
+    """Web platform configuration."""
+
+    headless: bool = True
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    device_profile: Optional[str] = None
+    user_agent: Optional[str] = None
+    start_url: str = "about:blank"
+    browser_type: str = "chromium"
+    stealth: bool = False
+    timeout_ms: int = 30000
+    locale: str = "zh-CN"
+    wechat_mock: bool = False
+    geolocation: Optional[dict] = None
+    cookies: list = field(default_factory=list)
+    local_storage: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -228,6 +249,7 @@ class ToolsConfig:
 
     disabled_tools: Optional[List[str]] = None
     stealth: bool = False
+    pel_enabled: bool = True
 
 
 @dataclass
@@ -252,6 +274,7 @@ class MobileConfig:
     credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
     external_agents: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
     def __post_init__(self):
         """Ensure default profiles exist."""
@@ -359,6 +382,9 @@ class MobileConfig:
             use_normalized_coordinates=agent_data.get(
                 "use_normalized_coordinates", False
             ),
+            optimize_tool_definitions=agent_data.get(
+                "optimize_tool_definitions", False
+            ),
             model_screenshot_max_side=agent_data.get("model_screenshot_max_side"),
             fast_agent=fast_agent_config,
             manager=manager_config,
@@ -401,6 +427,7 @@ class MobileConfig:
             credentials=CredentialsConfig(**(data.get("credentials") or {})),
             external_agents=external_agents,
             mcp=mcp_config,
+            web=WebConfig(**(data.get("web") or {})),
         )
 
     @classmethod

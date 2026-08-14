@@ -59,6 +59,9 @@ anthropic = [
     "anthropic>=0.67.0",
     "llama-index-llms-anthropic>=0.8.6,<0.9.0",
 ]
+web = [
+    "playwright>=1.49.0",
+]
 dev = [
     "black==25.9.0",
     "ruff>=0.13.0",

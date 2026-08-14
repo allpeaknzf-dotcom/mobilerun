@@ -206,6 +206,17 @@ def _record_driver_log_delta(
         _record_macro_action(ctx, dict(raw_action), pre_ui=pre_ui)
 
 
+def _mark_state_dirty(ctx: "ActionContext") -> None:
+    """Invalidate an optional cached state provider after a mutating action."""
+    state_provider = getattr(ctx, "state_provider", None)
+    mark_dirty = getattr(state_provider, "mark_dirty", None)
+    if callable(mark_dirty):
+        try:
+            mark_dirty()
+        except Exception as e:
+            logger.debug("Failed to mark state dirty: %s", e)
+
+
 async def click(index: int, *, ctx: "ActionContext") -> ActionResult:
     """Click the element with the given index."""
     try:
@@ -217,6 +228,7 @@ async def click(index: int, *, ctx: "ActionContext") -> ActionResult:
             {"action_type": "tap", "x": x, "y": y},
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
 
         info = ctx.ui.get_element_info(index)
         detail_parts = [
@@ -255,6 +267,7 @@ async def long_press(index: int, *, ctx: "ActionContext") -> ActionResult:
             },
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(
             success=True, summary=f"Long pressed element at index {index} at ({x}, {y})"
         )
@@ -282,6 +295,7 @@ async def long_press_at(x: int, y: int, *, ctx: "ActionContext") -> ActionResult
             },
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(success=True, summary=f"Long pressed at ({abs_x}, {abs_y})")
     except Exception as e:
         return ActionResult(
@@ -300,6 +314,7 @@ async def click_at(x: int, y: int, *, ctx: "ActionContext") -> ActionResult:
             {"action_type": "tap", "x": abs_x, "y": abs_y},
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(success=True, summary=f"Tapped at ({abs_x}, {abs_y})")
     except Exception as e:
         return ActionResult(success=False, summary=f"Failed to tap at ({x}, {y}): {e}")
@@ -321,6 +336,7 @@ async def click_area(
             {"action_type": "tap", "x": abs_x, "y": abs_y},
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(
             success=True, summary=f"Tapped center of area at ({abs_x}, {abs_y})"
         )
@@ -351,6 +367,7 @@ async def type_text(
                 {"action_type": "input_text", "text": text, "clear": clear},
                 pre_ui=pre_ui,
             )
+            _mark_state_dirty(ctx)
             return ActionResult(
                 success=True, summary=f"Text typed successfully (clear={clear})"
             )
@@ -375,6 +392,7 @@ async def type_text_direct(
                 {"action_type": "input_text", "text": text, "clear": clear},
                 pre_ui=pre_ui,
             )
+            _mark_state_dirty(ctx)
             return ActionResult(
                 success=True, summary=f"Text typed successfully (clear={clear})"
             )
@@ -393,6 +411,7 @@ async def system_button(button: str, *, ctx: "ActionContext") -> ActionResult:
             {"action_type": "button_press", "button": button},
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(success=True, summary=f"Pressed {button.upper()} button")
     except ValueError as e:
         return ActionResult(success=False, summary=str(e))
@@ -440,6 +459,7 @@ async def swipe(
             },
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(
             success=True,
             summary=f"Swiped from ({start_x}, {start_y}) to ({end_x}, {end_y})",
@@ -472,6 +492,7 @@ async def open_app(text: str, *, ctx: "ActionContext") -> ActionResult:
     if isinstance(result, str) and "could not open app" in result.lower():
         return ActionResult(success=False, summary=result)
     _record_driver_log_delta(ctx, driver_log_before, pre_ui=pre_ui)
+    _mark_state_dirty(ctx)
     return ActionResult(success=True, summary=str(result))
 
 
@@ -507,6 +528,7 @@ async def open_bundle_id(
             {"action_type": "start_app", "package": identifier, "activity": None},
             pre_ui=pre_ui,
         )
+        _mark_state_dirty(ctx)
         return ActionResult(success=True, summary=str(result))
     except Exception as e:
         return ActionResult(
@@ -578,6 +600,7 @@ async def type_secret(
                 },
                 pre_ui=pre_ui,
             )
+            _mark_state_dirty(ctx)
             return ActionResult(
                 success=True,
                 summary=f"Successfully typed secret '{secret_id}' into element {index}",
@@ -596,3 +619,36 @@ async def type_secret(
             success=False,
             summary=f"Failed to type secret '{secret_id}': not found. Available: {available}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Web-specific actions
+# ---------------------------------------------------------------------------
+
+
+async def open_app_web(text: str, *, ctx: "ActionContext") -> ActionResult:
+    """Navigate to a URL or resolve a domain/search phrase."""
+    from mobilerun.tools.driver.web import _resolve_url
+
+    try:
+        result = await ctx.driver.start_app(_resolve_url(text))
+        _mark_state_dirty(ctx)
+        return ActionResult(success=True, summary=str(result))
+    except Exception as e:
+        return ActionResult(success=False, summary=f"Navigation failed: {e}")
+
+
+async def scroll(
+    direction: str, amount: int = 300, *, ctx: "ActionContext"
+) -> ActionResult:
+    """Scroll a web page."""
+    if direction not in ("up", "down"):
+        return ActionResult(
+            success=False, summary="direction must be 'up' or 'down'"
+        )
+    try:
+        await ctx.driver.scroll(direction, amount)
+        _mark_state_dirty(ctx)
+        return ActionResult(success=True, summary=f"Scrolled {direction}")
+    except Exception as e:
+        return ActionResult(success=False, summary=f"Scroll failed: {e}")

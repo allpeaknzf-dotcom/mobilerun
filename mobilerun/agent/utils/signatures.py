@@ -11,7 +11,9 @@ from mobilerun.agent.utils.actions import (
     long_press,
     long_press_at,
     open_app,
+    open_app_web,
     open_bundle_id,
+    scroll,
     swipe,
     system_button,
     type_secret,
@@ -19,6 +21,7 @@ from mobilerun.agent.utils.actions import (
     type_text_direct,
     wait,
 )
+from mobilerun.agent.utils.page_actions import page_action
 
 logger = logging.getLogger("mobilerun")
 
@@ -29,6 +32,7 @@ async def build_tool_registry(
     platform: str = "android",
     exact_app_launch: bool = False,
     screenshot_only: bool = False,
+    pel_enabled: bool = False,
 ) -> tuple[ToolRegistry, set[str]]:
     """Build a ToolRegistry with all standard mobilerun tools.
 
@@ -108,14 +112,21 @@ async def build_tool_registry(
 
     # -- Core UI actions -----------------------------------------------------
 
+    click_description = (
+        "Click the point on the screen with specified index. "
+        'Usage Example: {"action": "click", "index": element_index}'
+    )
+    if pel_enabled:
+        click_description = (
+            "Fallback click by index. Prefer `page_action` for targets described "
+            "by a semantic name, and use indexed click if semantic location fails. "
+            'Usage Example: {"action": "click", "index": element_index}'
+        )
     registry.register(
         "click",
         fn=click,
         params={"index": {"type": "number", "required": True}},
-        description=(
-            "Click the point on the screen with specified index. "
-            'Usage Example: {"action": "click", "index": element_index}'
-        ),
+        description=click_description,
         deps={"tap", "element_index"},
     )
 
@@ -165,6 +176,25 @@ async def build_tool_registry(
         deps={"swipe", "convert_point"},
     )
 
+    type_description = (
+        "Type text into an input box or text field. If the target input is "
+        "already focused or the keyboard is open, call type without index, "
+        'for example {"action": "type", "text": "example.com", "clear": true}. '
+        "Specify index only when it is a real input/text-field element that "
+        "must be focused before typing. "
+        'Usage Example: {"action": "type", "text": "example.com", "index": element_index, "clear": true}. '
+        "If a visible input is missing from the accessibility tree, click it by coordinates, "
+        "observe that it is focused, then use type without index. By "
+        "default, text is APPENDED to existing content. Set clear=True to "
+        "clear the field first."
+    )
+    if pel_enabled:
+        type_description = (
+            "Fallback typing by index. Prefer `page_action` with action='type' "
+            "for fields described by a semantic name. If the target is already "
+            "focused, call type without index. By default text is appended; "
+            "set clear=True to replace existing content."
+        )
     registry.register(
         "type",
         fn=type_text,
@@ -173,18 +203,7 @@ async def build_tool_registry(
             "index": {"type": "number", "required": False, "default": None},
             "clear": {"type": "boolean", "required": False, "default": False},
         },
-        description=(
-            "Type text into an input box or text field. If the target input is "
-            "already focused or the keyboard is open, call type without index, "
-            'for example {"action": "type", "text": "example.com", "clear": true}. '
-            "Specify index only when it is a real input/text-field element that "
-            "must be focused before typing. "
-            'Usage Example: {"action": "type", "text": "example.com", "index": element_index, "clear": true}. '
-            "If a visible input is missing from the accessibility tree, click it by coordinates, "
-            "observe that it is focused, then use type without index. By "
-            "default, text is APPENDED to existing content. Set clear=True to "
-            "clear the field first."
-        ),
+        description=type_description,
         deps={"tap", "input_text", "element_index"},
     )
 
@@ -246,6 +265,22 @@ async def build_tool_registry(
         ),
     )
 
+    if platform.lower() == "web":
+        registry.register(
+            "scroll",
+            fn=scroll,
+            params={
+                "direction": {"type": "string", "required": True},
+                "amount": {"type": "number", "required": False, "default": 300},
+            },
+            description=(
+                "Scroll the web page up or down. direction must be 'up' or "
+                "'down'; amount is pixels. "
+                'Usage: {"action": "scroll", "direction": "down"}'
+            ),
+            deps={"scroll"},
+        )
+
     # -- App / state / flow control ------------------------------------------
 
     if exact_app_launch:
@@ -257,6 +292,18 @@ async def build_tool_registry(
                 "Open an app by exact app identifier. Use the package name or "
                 "bundle identifier required by the current device backend. "
                 'Usage: {"action": "open_app", "app_id": "com.example.app"}'
+            ),
+            deps={"start_app"},
+        )
+    elif platform.lower() == "web":
+        registry.register(
+            "open_app",
+            fn=open_app_web,
+            params={"text": {"type": "string", "required": True}},
+            description=(
+                "Navigate to a URL or web application. Accepts full URLs or "
+                "domain names. "
+                'Usage: {"action": "open_app", "text": "https://github.com"}'
             ),
             deps={"start_app"},
         )
@@ -296,6 +343,29 @@ async def build_tool_registry(
             "message contains the result, answer, or explanation."
         ),
     )
+
+    if pel_enabled:
+        registry.register(
+            "page_action",
+            fn=page_action,
+            params={
+                "action": {"type": "string", "required": True},
+                "element": {"type": "string", "required": False, "default": ""},
+                "value": {"type": "string", "required": False, "default": ""},
+                "invalidate_after": {
+                    "type": "array",
+                    "required": False,
+                    "default": None,
+                },
+            },
+            description=(
+                "Semantic page operation with cached and fallback element "
+                "location. action: 'click', 'type', 'scroll_to', 'wait_for', "
+                "or 'verify'. element is the visible semantic name; value is "
+                "required for type."
+            ),
+            deps={"tap", "input_text", "element_index"},
+        )
 
     standard_tool_names = set(registry.tools.keys())
 
