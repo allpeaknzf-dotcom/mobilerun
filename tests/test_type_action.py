@@ -44,7 +44,12 @@ class TypeActionTest(unittest.TestCase):
     def test_provided_index_taps_element_before_typing(self):
         driver = FakeDriver()
         ui = FakeUI()
-        ctx = SimpleNamespace(driver=driver, ui=ui)
+        dirty_calls = []
+        ctx = SimpleNamespace(
+            driver=driver,
+            ui=ui,
+            state_provider=SimpleNamespace(mark_dirty=lambda: dirty_calls.append(True)),
+        )
 
         result = asyncio.run(type_text("usb c cable", index=5, clear=True, ctx=ctx))
 
@@ -52,6 +57,7 @@ class TypeActionTest(unittest.TestCase):
         self.assertEqual(ui.requested_indices, [5])
         self.assertEqual(driver.taps, [(123, 456)])
         self.assertEqual(driver.inputs, [("usb c cable", True)])
+        self.assertEqual(dirty_calls, [True])
 
     def test_minus_one_index_keeps_backward_compatible_direct_typing(self):
         driver = FakeDriver()

@@ -227,10 +227,9 @@ class ToolsConfig:
     disabled_tools: Optional[List[str]] = None
     stealth: bool = False
     # PEL (Page Element Layer): 启用页面元素层 —— 结构指纹缓存 + 语义化
-    # page_action 工具 + 自动发现。默认 False（关闭时行为与未接入完全一致，
-    # 零退化）。开启后 CachedStateProvider 包装 state_provider，并注册
-    # page_action 工具。
-    pel_enabled: bool = False
+    # page_action 工具 + 自动发现。默认 True，让 App/Web 在未显式配置时都走
+    # 混合定位恢复链；如需回退旧行为，可在用户配置中显式关闭。
+    pel_enabled: bool = True
 
 
 @dataclass

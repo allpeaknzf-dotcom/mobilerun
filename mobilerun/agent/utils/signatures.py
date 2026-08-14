@@ -112,14 +112,23 @@ async def build_tool_registry(
 
     # -- Core UI actions -----------------------------------------------------
 
+    click_description = (
+        "Click the point on the screen with specified index. "
+        'Usage Example: {"action": "click", "index": element_index}'
+    )
+    if pel_enabled:
+        click_description = (
+            "Fallback click by index. When the target is named semantically "
+            "(for example 'Log in', 'Payout', 'Email address', '登录按钮'), "
+            "prefer `page_action` first and use index click only after "
+            "`page_action` is unavailable or has already failed. "
+            'Usage Example: {"action": "click", "index": element_index}'
+        )
     registry.register(
         "click",
         fn=click,
         params={"index": {"type": "number", "required": True}},
-        description=(
-            "Click the point on the screen with specified index. "
-            'Usage Example: {"action": "click", "index": element_index}'
-        ),
+        description=click_description,
         deps={"tap", "element_index"},
     )
 
@@ -169,6 +178,32 @@ async def build_tool_registry(
         deps={"swipe", "convert_point"},
     )
 
+    type_description = (
+        "Type text into an input box or text field. If the target input is "
+        "already focused or the keyboard is open, call type without index, "
+        'for example {"action": "type", "text": "example.com", "clear": true}. '
+        "Specify index only when it is a real input/text-field element that "
+        "must be focused before typing. "
+        'Usage Example: {"action": "type", "text": "example.com", "index": element_index, "clear": true}. '
+        "If a visible input is missing from the accessibility tree, click it by coordinates, "
+        "observe that it is focused, then use type without index. By "
+        "default, text is APPENDED to existing content. Set clear=True to "
+        "clear the field first."
+    )
+    if pel_enabled:
+        type_description = (
+            "Fallback typing by index. When the field is described by name "
+            "(for example 'Email address', 'Password', 'OTP输入框'), prefer "
+            "`page_action` with action='type' first and use indexed `type` "
+            "only after semantic location is unavailable or has failed. "
+            "If the target input is already focused or the keyboard is open, "
+            'call type without index, for example {"action": "type", "text": "example.com", "clear": true}. '
+            "Specify index only when it is a real input/text-field element that "
+            "must be focused before typing. "
+            'Usage Example: {"action": "type", "text": "example.com", "index": element_index, "clear": true}. '
+            "By default, text is APPENDED to existing content. Set clear=True "
+            "to clear the field first."
+        )
     registry.register(
         "type",
         fn=type_text,
@@ -177,18 +212,7 @@ async def build_tool_registry(
             "index": {"type": "number", "required": False, "default": None},
             "clear": {"type": "boolean", "required": False, "default": False},
         },
-        description=(
-            "Type text into an input box or text field. If the target input is "
-            "already focused or the keyboard is open, call type without index, "
-            'for example {"action": "type", "text": "example.com", "clear": true}. '
-            "Specify index only when it is a real input/text-field element that "
-            "must be focused before typing. "
-            'Usage Example: {"action": "type", "text": "example.com", "index": element_index, "clear": true}. '
-            "If a visible input is missing from the accessibility tree, click it by coordinates, "
-            "observe that it is focused, then use type without index. By "
-            "default, text is APPENDED to existing content. Set clear=True to "
-            "clear the field first."
-        ),
+        description=type_description,
         deps={"tap", "input_text", "element_index"},
     )
 
@@ -354,11 +378,22 @@ async def build_tool_registry(
                 "available and falls back to CSS/text/spatial automatically, making "
                 "it faster and more reliable. "
                 "action: 'click' | 'type' | 'scroll_to' | 'wait_for' | 'verify'. "
+                "For menu/navigation flows, use this with a follow-up verify and "
+                "do not treat submenu expansion as page entry; if a same-name "
+                "child appears, continue to the deepest visible leaf item. "
+                "If a click opens a different section from the explicit target, "
+                "use system_button(back) once and retry the named target instead "
+                "of guessing a sibling item. "
+                "When the user label and UI label differ only by spacing/case/"
+                "punctuation (for example 'payout' vs 'Pay Out'), treat them as "
+                "the same target and prefer trying page_action before concluding "
+                "the item is missing. After a navigation miss, prefer one "
+                "back-and-retry cycle before indexed clicking. "
                 "element: semantic name of the element (e.g. '登录按钮'). "
                 "value: text to type (required for action='type'). "
                 "invalidate_after: optional list of element names whose cache is "
                 "cleared after the action (AJAX refresh compensation). "
-                'Usage: {"action": "page_action", "action": "click", "element": "登录按钮"}'
+                'Usage: {"action": "click", "element": "登录按钮"}'
             ),
             deps={"tap", "input_text", "element_index"},
         )

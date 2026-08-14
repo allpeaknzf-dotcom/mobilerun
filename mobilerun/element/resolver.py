@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 
 from mobilerun.element.cache import ElementCache
@@ -104,6 +105,26 @@ DEEP_DOM_SCAN_JS = r"""
   let iframeDetected = false;
   let crossOriginIframe = false;
   let shadowRootsScanned = 0;
+  const squashText = (value) => (value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const extractLabel = (el) => {
+    const attrLabel = (el.getAttribute && (
+      el.getAttribute('aria-label')
+      || el.getAttribute('placeholder')
+      || el.getAttribute('title')
+      || el.getAttribute('alt')
+    )) || '';
+    if (attrLabel) return squashText(attrLabel);
+    let cleaned = '';
+    try {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(
+        '[role="menu"],[role="listbox"],[role="tree"],[role="dialog"],script,style'
+      ).forEach((node) => node.remove());
+      cleaned = squashText(clone.innerText || clone.textContent || '');
+    } catch (e) {}
+    if (cleaned) return cleaned;
+    return squashText(el.innerText || el.textContent || '');
+  };
 
   const collectFrom = (root, source, depth) => {
     let nodes = [];
@@ -138,11 +159,19 @@ DEEP_DOM_SCAN_JS = r"""
         id: (el.id || ''),
         className: (typeof el.className === 'string' ? el.className : ''),
         name: (el.getAttribute && el.getAttribute('name')) || '',
-        text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        text: extractLabel(el),
         placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
         title: (el.getAttribute && el.getAttribute('title')) || '',
         ariaLabel: aria || '',
         href: (el.getAttribute && el.getAttribute('href')) || '',
+        ariaExpanded: (el.getAttribute && el.getAttribute('aria-expanded')) || '',
+        ariaCurrent: (el.getAttribute && el.getAttribute('aria-current')) || '',
+        childMenuItemCount: el.querySelectorAll
+          ? el.querySelectorAll('[role="menuitem"]').length
+          : 0,
+        childMenuCount: el.querySelectorAll
+          ? el.querySelectorAll('[role="menu"]').length
+          : 0,
         contentEditable: el.isContentEditable === true,
         disabled: isDisabled,
         visible: visible,
@@ -248,6 +277,11 @@ def normalize_keyword(element_name: str) -> str:
     return kw
 
 
+def compact_text(value: str) -> str:
+    """把空格/连字符等分隔差异折叠掉，便于做通用弱归一化匹配。"""
+    return re.sub(r"[\s\-_:/]+", "", (value or "").strip().lower())
+
+
 def expand_synonyms(keyword: str) -> set[str]:
     """把核心关键词扩展为同义词集合（含自身，全部小写）。"""
     kw = (keyword or "").strip().lower()
@@ -275,6 +309,23 @@ def is_input_like(cand: dict) -> bool:
     return role in _INPUT_ROLES
 
 
+def _intish(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _menu_tree_stats(cand: dict) -> tuple[int, int]:
+    """返回候选下挂菜单数量：(menuitem descendants, menu descendants)."""
+    return (
+        _intish(
+            cand.get("childMenuItemCount", cand.get("descendantMenuItemCount", 0))
+        ),
+        _intish(cand.get("childMenuCount", cand.get("descendantMenuCount", 0))),
+    )
+
+
 def score_dom_candidate(
     cand: dict, target: str, synonyms: set[str], action: str = "click"
 ) -> int:
@@ -292,22 +343,60 @@ def score_dom_candidate(
         str(cand.get(k, "") or "") for k in ("id", "className", "name")
     ).lower()
     tag = (cand.get("tag", "") or "").lower()
+    role = (cand.get("role", "") or "").lower()
     itype = (cand.get("type", "") or "").lower()
+    href = (cand.get("href", "") or "").strip().lower()
+    aria_current = (cand.get("ariaCurrent", "") or "").strip().lower()
+    aria_expanded = (cand.get("ariaExpanded", "") or "").strip().lower()
+    child_menu_items, child_menus = _menu_tree_stats(cand)
+    target_compact = compact_text(target)
+    text_compact = compact_text(text)
+    aria_compact = compact_text(aria)
+    title_compact = compact_text(title)
+    placeholder_compact = compact_text(placeholder)
+    blob_id_compact = compact_text(blob_id)
+    compact_synonyms = {compact_text(s) for s in synonyms if compact_text(s)}
 
     # ── 正向 ──
-    if text and (text == target or text in synonyms):
+    if text and (
+        text == target
+        or text in synonyms
+        or (target_compact and text_compact == target_compact)
+        or text_compact in compact_synonyms
+    ):
         score += 100
-    elif text and any(s and s in text for s in synonyms):
+    elif text and any(
+        s and (s in text or compact_text(s) in text_compact) for s in synonyms
+    ):
         score += 80
 
-    if any(s and (s in aria or s in title or s in placeholder) for s in synonyms):
+    if any(
+        s and (
+            s in aria
+            or s in title
+            or s in placeholder
+            or compact_text(s) in aria_compact
+            or compact_text(s) in title_compact
+            or compact_text(s) in placeholder_compact
+        )
+        for s in synonyms
+    ):
         score += 70
 
-    if any(s and s in blob_id for s in synonyms):
+    if any(
+        s and (s in blob_id or compact_text(s) in blob_id_compact)
+        for s in synonyms
+    ):
         score += 50
 
     if tag == "button" or (tag == "input" and itype in {"submit", "button"}):
         score += 20
+    if href:
+        score += 25
+    if aria_current in {"page", "step", "true"}:
+        score += 20
+    if role == "menuitem" and child_menu_items == 0 and child_menus == 0:
+        score += 25
 
     if cand.get("visible"):
         score += 20
@@ -325,6 +414,12 @@ def score_dom_candidate(
     rect = cand.get("rect", {}) or {}
     if rect.get("width", 999) < 24 or rect.get("height", 999) < 24:
         score -= 40
+    if aria_expanded == "true":
+        score -= 80
+    if child_menus > 0:
+        score -= min(90, 50 + child_menus * 20)
+    if child_menu_items > 0:
+        score -= min(80, 30 + child_menu_items * 12)
 
     target_is_negative = target in _NEGATIVE_TEXTS or bool(synonyms & _NEGATIVE_TEXTS)
     if text in _NEGATIVE_TEXTS and not target_is_negative:
@@ -340,6 +435,104 @@ def score_dom_candidate(
     return score
 
 
+def _web_tag_name(el: dict) -> str:
+    class_name = (el.get("className", "") or "").strip().lower()
+    return class_name.split(":", 1)[0] if class_name else ""
+
+
+def _web_text_match_score(el: dict, query: str, exact: bool, field: str = "text") -> int:
+    """Web 文本候选打分：优先精确/紧凑命中，压低长拼接容器。"""
+    query_raw = (query or "").strip().lower()
+    query_compact = compact_text(query_raw)
+    if not query_raw:
+        return -1
+
+    values: list[tuple[str, bool]] = []
+    primary = (el.get(field, "") or "").strip().lower() if field != "text" else ""
+    if primary:
+        values.append((primary, False))
+
+    el_text = (el.get("text", "") or "").strip().lower()
+    if el_text and (field == "text" or el_text != primary):
+        values.append((el_text, False))
+
+    class_name = (el.get("className", "") or "").strip().lower()
+    if class_name:
+        values.append((class_name, True))
+
+    role = (el.get("role", "") or "").strip().lower()
+    href = (el.get("href", "") or "").strip().lower()
+    aria_current = (el.get("ariaCurrent", "") or "").strip().lower()
+    aria_expanded = (el.get("ariaExpanded", "") or "").strip().lower()
+    child_menu_items, child_menus = _menu_tree_stats(el)
+
+    best = -1
+    pattern = re.compile(
+        f"^{re.escape(query_raw)}$" if exact else re.escape(query_raw),
+        re.IGNORECASE,
+    )
+    for value, is_class_name in values:
+        value_compact = compact_text(value)
+        base = -1
+        if exact:
+            if value == query_raw:
+                base = 240
+            elif query_compact and value_compact == query_compact:
+                base = 230
+        else:
+            if value == query_raw:
+                base = 220
+            elif query_compact and value_compact == query_compact:
+                base = 210
+            elif pattern.search(value):
+                base = 170
+            elif query_compact and query_compact in value_compact:
+                base = 160
+        if base < 0:
+            continue
+
+        if is_class_name:
+            base -= 80
+
+        compact_gap = abs(len(value_compact) - len(query_compact))
+        base -= min(compact_gap, 40)
+
+        tag = _web_tag_name(el)
+        if tag in {"button", "input", "textarea", "a", "span", "label"}:
+            base += 20
+        elif tag in {"div", "li", "ul", "nav"}:
+            base -= 20
+        if href:
+            base += 20
+        if aria_current in {"page", "step", "true"}:
+            base += 15
+        if role == "menuitem" and child_menu_items == 0 and child_menus == 0:
+            base += 30
+        if aria_expanded == "true":
+            base -= 90
+        if child_menus > 0:
+            base -= min(110, 60 + child_menus * 20)
+        if child_menu_items > 0:
+            base -= min(90, 30 + child_menu_items * 12)
+
+        if len(value) > max(40, len(query_raw) * 4):
+            base -= min(80, len(value) - max(40, len(query_raw) * 4))
+        if len(value.split()) > 6:
+            base -= 20
+
+        bounds = el.get("boundsInScreen", {}) or {}
+        width = max(0, int(bounds.get("right", 0)) - int(bounds.get("left", 0)))
+        height = max(0, int(bounds.get("bottom", 0)) - int(bounds.get("top", 0)))
+        area = width * height
+        if area > 300000:
+            base -= 50
+        elif area > 150000:
+            base -= 25
+
+        best = max(best, base)
+    return best
+
+
 def _candidate_brief(cand: dict) -> dict:
     """从候选里抽取用于诊断/日志的精简信息（不含大字段如 snippet）。"""
     return {
@@ -350,6 +543,9 @@ def _candidate_brief(cand: dict) -> dict:
         "disabled": bool(cand.get("disabled")),
         "visible": bool(cand.get("visible")),
         "inViewport": bool(cand.get("inViewport")),
+        "ariaExpanded": cand.get("ariaExpanded", ""),
+        "childMenuItemCount": _menu_tree_stats(cand)[0],
+        "childMenuCount": _menu_tree_stats(cand)[1],
     }
 
 
@@ -761,36 +957,21 @@ class LocatorResolver:
     def _match_text_web(
         self, elements: list[dict], text: str, exact: bool, field: str = "text"
     ) -> LocatorResult:
-        """Web 平台独立文本匹配（匹配 text + className 字段）。"""
-        import re
-
+        """Web 平台独立文本匹配（候选打分，避免首个容器误命中）。"""
         text_lower = text.lower().strip()
         if not text_lower:
             return LocatorResult(success=False, error="Empty text query")
-        pattern = re.compile(
-            f"^{re.escape(text_lower)}$" if exact else re.escape(text_lower),
-            re.IGNORECASE,
-        )
 
         best = None
+        best_score = -1
         for el in self._flatten_elements(elements):
             checked = el.get("checkedState", "") or ""
             if "disabled" in checked:
                 continue
-            el_text = (el.get("text", "") or "").lower().strip()
-            class_name = (el.get("className", "") or "").lower()
-
-            if el_text and pattern.search(el_text):
+            score = _web_text_match_score(el, text_lower, exact, field)
+            if score > best_score:
                 best = el
-                if exact and el_text == text_lower:
-                    break
-                if not exact:
-                    break
-                continue
-            if class_name and pattern.search(class_name):
-                best = el
-                if not exact:
-                    break
+                best_score = score
 
         if best:
             x, y = self._center(best)

@@ -140,6 +140,13 @@ When done:
 - Prefer one tool call per response so you can observe the result before acting again
 {% endif %}
 - Use `complete` to signal task completion (success or failure)
+- Treat label differences caused only by case, spaces, punctuation, or common word splitting as equivalent when reasoning about targets. For example, `payout`, `Pay Out`, and `pay-out` are usually the same target until the updated state proves otherwise.
+- For menu or navigation tasks, a successful click is not enough to call `complete`. Re-check the updated state and confirm destination evidence such as URL/title change, newly loaded main content, active page indicators, or the target leaf menu item being opened.
+- If clicking `X` only expands a submenu, or the updated state reveals another deeper menu item also named `X`, you clicked a parent expander. Continue to the deepest visible `X` leaf item before completing.
+- If an expanded parent menu is the right area but the expected child item is not yet visible, scroll the nearby navigation container/sidebar and re-check before concluding the item is missing.
+- For menu discovery on web, do not call `complete(false)` immediately after one expansion. If the target section looks correct but the leaf item is not visible yet, do at least one nearby scroll/re-check cycle and then try the normalized label variant through `page_action` before concluding the item is missing.
+- If a navigation click opens a different section than the user explicitly named, do not continue by guessing sibling items. Use `system_button(back)` once to return to the previous stable state, then retry the explicitly named target.
+- After a navigation-related miss from `page_action`, prefer one back-and-retry cycle before `complete(false)`. Only fall back to index clicking after the explicit target has been retried and still cannot be located.
 - **Before navigating away from a screen that contains data you need later** (names, numbers, dates, settings values, list items), save it using `<add_memory>` tags. Write plain text, not JSON. Your memory is shown to you each step in the `<memory>` block. Only record NEW facts — if nothing new is worth remembering, omit the tag.
 - Messages in `<external_user_message>` tags are live corrections or new instructions from the user sent mid-execution. They override earlier assumptions — honor the most recent user guidance on your next step
 

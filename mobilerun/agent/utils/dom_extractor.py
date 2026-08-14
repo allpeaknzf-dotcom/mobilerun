@@ -18,6 +18,26 @@ DOM_EXTRACTOR_JS = """
 
   const results = [];
   let idx = 0;
+  const squashText = (value) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+  const extractLabel = (el) => {
+    const attrLabel = el.getAttribute('aria-label')
+      || el.getAttribute('placeholder')
+      || el.getAttribute('title')
+      || el.getAttribute('alt')
+      || '';
+    if (attrLabel) return squashText(attrLabel);
+
+    let cleaned = '';
+    try {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(
+        '[role="menu"],[role="listbox"],[role="tree"],[role="dialog"],script,style'
+      ).forEach(node => node.remove());
+      cleaned = squashText(clone.innerText || clone.textContent || '');
+    } catch (e) {}
+    if (cleaned) return cleaned;
+    return squashText(el.innerText || el.textContent || '');
+  };
 
   document.querySelectorAll(INTERACTIVE).forEach(el => {
     const rect = el.getBoundingClientRect();
@@ -27,14 +47,7 @@ DOM_EXTRACTOR_JS = """
     if (style.visibility === 'hidden' || style.display === 'none') return;
     if (parseFloat(style.opacity) === 0) return;
 
-    let label = el.getAttribute('aria-label')
-             || el.getAttribute('placeholder')
-             || el.getAttribute('title')
-             || el.getAttribute('alt')
-             || '';
-    if (!label) {
-      label = (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
-    }
+    const label = extractLabel(el);
 
     let tag = el.tagName.toLowerCase();
     let etype = el.getAttribute('type')
@@ -45,6 +58,7 @@ DOM_EXTRACTOR_JS = """
       index: idx,
       tag: tag,
       type: etype,
+      role: el.getAttribute('role') || '',
       text: label,
       bounds: Math.round(rect.left) + ','
             + Math.round(rect.top) + ','
@@ -54,6 +68,10 @@ DOM_EXTRACTOR_JS = """
       checked: el.checked !== undefined ? el.checked : null,
       disabled: el.disabled || null,
       href: el.getAttribute('href') || null,
+      aria_expanded: el.getAttribute('aria-expanded') || null,
+      aria_current: el.getAttribute('aria-current') || null,
+      descendant_menuitem_count: el.querySelectorAll('[role="menuitem"]').length,
+      descendant_menu_count: el.querySelectorAll('[role="menu"]').length,
       input_type: el.getAttribute('type') || null,
     });
 
@@ -124,5 +142,13 @@ def normalize_element(element: dict) -> dict:
             "bottom": bounds_parts[3],
         },
         "checkedState": checked_state,
+        "role": element.get("role", ""),
+        "href": href or "",
+        "ariaExpanded": element.get("aria_expanded") or "",
+        "ariaCurrent": element.get("aria_current") or "",
+        "descendantMenuItemCount": int(
+            element.get("descendant_menuitem_count") or 0
+        ),
+        "descendantMenuCount": int(element.get("descendant_menu_count") or 0),
         "children": [],
     }

@@ -47,15 +47,48 @@ def _current_page(ctx: "ActionContext") -> Optional[dict]:
 def _resolve_selectors(
     ctx: "ActionContext", element: str, page_def: Optional[dict]
 ) -> list[dict]:
-    """获取元素定位策略列表（短格式）。无预定义 → 用元素名做 text 匹配。"""
+    """获取元素定位策略列表。
+
+    页面定义 selector 优先，但不会阻断语义文本回退：
+    - 若页面定义存在 detected_selectors，先按原顺序使用；
+    - 若其中尚未包含等价的文本 selector，则追加一个 TEXT_FUZZY(element)
+      作为兜底，避免脏/过期 selector 让定位提前失败；
+    - 无预定义时，直接用元素名做 text 匹配。
+    """
+    fallback = {"type": Strategy.TEXT_FUZZY, "value": element}
     if page_def:
         el = page_def.get("elements", {}).get(element)
         if el:
             selectors = el.get("detected_selectors", [])
             if selectors:
-                return list(selectors)
-    # 降级：纯 text 模糊匹配
-    return [{"type": Strategy.TEXT_FUZZY, "value": element}]
+                resolved = list(selectors)
+                has_equivalent_text = any(
+                    (
+                        s.get("type") == Strategy.TEXT_FUZZY
+                        and s.get("value") == element
+                    )
+                    or s.get("text") == element
+                    or s.get("text_exact") == element
+                    for s in resolved
+                    if isinstance(s, dict)
+                )
+                if not has_equivalent_text:
+                    resolved.append(fallback)
+                return resolved
+    return [fallback]
+
+
+def _mark_state_dirty(ctx: "ActionContext") -> None:
+    """交互后标记状态缓存失效，确保下一次页面读取走完整探测。"""
+    sp = getattr(ctx, "state_provider", None)
+    if sp is None:
+        return
+    mark_dirty = getattr(sp, "mark_dirty", None)
+    if callable(mark_dirty):
+        try:
+            mark_dirty()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("mark_dirty failed: %s", e)
 
 
 async def _refresh_state_for_retry(ctx: "ActionContext") -> None:
@@ -117,7 +150,13 @@ async def _resolve_with_standard_retries(
                 "attempt": i + 1,
                 "page": page_def.get("name") if page_def else "",
                 "selector_count": len(selectors),
-                "selector_source": "page_def" if page_def else "fallback_text_fuzzy",
+                "selector_source": (
+                    "page_def+fallback_text_fuzzy"
+                    if page_def and len(selectors) > 1
+                    else "page_def"
+                    if page_def
+                    else "fallback_text_fuzzy"
+                ),
                 "success": result.success,
                 "error": result.error,
                 "strategy": result.strategy_used.name if result.success else "",
@@ -234,7 +273,12 @@ def _build_failure_summary(element: str, trace: dict) -> str:
             line += ", disabled=true"
         line += f"), reason={deep.get('reason', 'unknown')}."
 
-    return line + "\nFall back to click(index=N)."
+    return (
+        line
+        + "\nIf this happened after entering the wrong section, use "
+        "system_button(back) once and retry the explicit target."
+        "\nFall back to click(index=N)."
+    )
 
 
 async def page_action(
@@ -288,13 +332,16 @@ async def page_action(
     try:
         if action == "click":
             await ctx.driver.tap(x, y)
+            _mark_state_dirty(ctx)
             summary = f"Clicked '{element}' at ({x}, {y})"
         elif action == "type":
             await ctx.driver.tap(x, y)
             await asyncio.sleep(0.2)
             await ctx.driver.input_text(value, clear=True)
+            _mark_state_dirty(ctx)
             summary = f"Typed into '{element}' at ({x}, {y})"
         elif action == "scroll_to":
+            _mark_state_dirty(ctx)
             summary = f"Scrolled to '{element}' at ({x}, {y})"
         elif action == "wait_for":
             summary = f"Element '{element}' is present at ({x}, {y})"

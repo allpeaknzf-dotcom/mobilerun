@@ -29,7 +29,6 @@ from mobilerun.pages.web.login_page import LoginPage
 from mobilerun.tools.ui.cached_provider import CachedStateProvider
 from mobilerun.tools.ui.state import UIState
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -217,7 +216,9 @@ class PageRegistryTest(unittest.TestCase):
         self.assertEqual(m["source"], "python")
         self.assertEqual(m["score"], 100)
         locs = r.get_element_locators(m["page"], "登录按钮", "web")
-        self.assertTrue(any("css" in l or "text" in l for l in locs))
+        self.assertTrue(
+            any("css" in locator or "text" in locator for locator in locs)
+        )
 
     def test_no_match_returns_none(self):
         r = PageRegistry()
@@ -384,6 +385,61 @@ class LocatorResolverTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_web_text_match_prefers_leaf_over_long_container(self):
+        async def run():
+            cache = ElementCache()
+            cache.set_page_fingerprint("fp")
+            drv = FakeWebDriver()
+            sp = FakeSP([
+                {
+                    "index": 0,
+                    "className": "li:menuitem",
+                    "text": "Funds Digital Wallets Transfer Number Transactions Confirm",
+                    "bounds": "0,0,260,600",
+                    "boundsInScreen": {
+                        "left": 0, "top": 0, "right": 260, "bottom": 600
+                    },
+                },
+                {
+                    "index": 1,
+                    "className": "button:submit",
+                    "text": "Confirm",
+                    "bounds": "760,460,880,506",
+                    "boundsInScreen": {
+                        "left": 760, "top": 460, "right": 880, "bottom": 506
+                    },
+                },
+            ])
+            res = LocatorResolver(drv, sp, cache)
+            r = await res.resolve([{"text": "Confirm"}], element_name="Confirm")
+            self.assertTrue(r.success)
+            self.assertEqual((r.x, r.y), (820, 483))
+
+        asyncio.run(run())
+
+    def test_web_text_match_compacts_spacing(self):
+        async def run():
+            cache = ElementCache()
+            cache.set_page_fingerprint("fp")
+            drv = FakeWebDriver()
+            sp = FakeSP([
+                {
+                    "index": 0,
+                    "className": "a:link",
+                    "text": "Pay Out",
+                    "bounds": "20,20,120,52",
+                    "boundsInScreen": {
+                        "left": 20, "top": 20, "right": 120, "bottom": 52
+                    },
+                },
+            ])
+            res = LocatorResolver(drv, sp, cache)
+            r = await res.resolve([{"text": "payout"}], element_name="payout")
+            self.assertTrue(r.success)
+            self.assertEqual((r.x, r.y), (70, 36))
+
+        asyncio.run(run())
+
     def test_web_spatial_below(self):
         async def run():
             cache = ElementCache()
@@ -479,6 +535,19 @@ class CachedStateProviderTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_mark_dirty_forces_next_full_probe(self):
+        async def run():
+            _, inner, _, csp = self._build()
+            await csp.get_state()
+            await csp.get_state()
+            self.assertEqual(inner.calls, 1)
+            csp.mark_dirty()
+            await csp.get_state()
+            self.assertEqual(inner.calls, 2)
+            self.assertIsNotNone(csp.current_page)
+
+        asyncio.run(run())
+
 
 # ---------------------------------------------------------------------------
 # page_action 工具 + 条件注册
@@ -529,6 +598,14 @@ class PageActionToolTest(unittest.TestCase):
         self.assertTrue(r.success)
         self.assertEqual(ctx.driver.taps, [(640, 400)])
 
+    def test_click_marks_state_dirty(self):
+        ctx = self._ctx()
+        dirty_calls = []
+        ctx.state_provider.mark_dirty = lambda: dirty_calls.append(True)
+        r = asyncio.run(page_action("click", element="登录按钮", ctx=ctx))
+        self.assertTrue(r.success)
+        self.assertEqual(dirty_calls, [True])
+
     def test_type(self):
         ctx = self._ctx()
         r = asyncio.run(
@@ -568,6 +645,47 @@ class PageActionToolTest(unittest.TestCase):
         asyncio.run(page_action("click", element="登录按钮", ctx=ctx))
         self.assertIsNone(ctx.element_cache.get("错误提示", vp))
 
+    def test_page_def_bad_selector_still_falls_back_to_text(self):
+        drv = FakeWebDriver()
+        cache = ElementCache()
+        cache.set_page_fingerprint("fp")
+        sp = SimpleNamespace(
+            current_page={
+                "elements": {
+                    "Pay Out": {
+                        "detected_selectors": [{"text_exact": "Transaction & Detail"}],
+                        "post_action_wait": 0,
+                    }
+                }
+            },
+        )
+
+        async def _get_state():
+            return SimpleNamespace(
+                elements=[
+                    {
+                        "index": 3,
+                        "className": "a:link",
+                        "text": "Pay Out",
+                        "bounds": "20,20,120,52",
+                        "boundsInScreen": {
+                            "left": 20, "top": 20, "right": 120, "bottom": 52,
+                        },
+                    },
+                ]
+            )
+
+        sp.get_state = _get_state
+        res = LocatorResolver(drv, sp, cache)
+        ctx = SimpleNamespace(
+            driver=drv, state_provider=sp,
+            locator_resolver=res, element_cache=cache,
+        )
+
+        r = asyncio.run(page_action("click", element="Pay Out", ctx=ctx))
+        self.assertTrue(r.success, r.summary)
+        self.assertEqual(ctx.driver.taps, [(70, 36)])
+
 
 # ---------------------------------------------------------------------------
 # 混合模式定位恢复（Phase A 常规重试 + Phase B DOM 深度扫描）
@@ -575,6 +693,8 @@ class PageActionToolTest(unittest.TestCase):
 
 
 from mobilerun.element.resolver import (  # noqa: E402
+    _web_text_match_score,
+    compact_text,
     expand_synonyms,
     is_input_like,
     normalize_keyword,
@@ -588,6 +708,8 @@ def _btn(**over):
         "tag": "button", "type": "submit", "role": "button", "id": "loginBtn",
         "className": "btn btn-primary login", "name": "login", "text": "登录",
         "placeholder": "", "title": "", "ariaLabel": "登录", "href": "",
+        "ariaExpanded": "", "ariaCurrent": "",
+        "childMenuItemCount": 0, "childMenuCount": 0,
         "contentEditable": False, "disabled": False, "visible": True,
         "inViewport": True,
         "rect": {"left": 100, "top": 420, "right": 240, "bottom": 464,
@@ -612,6 +734,10 @@ class DomScanScoringTest(unittest.TestCase):
         self.assertIn("login", syn)
         self.assertIn("sign in", syn)
 
+    def test_compact_text_normalizes_spacing(self):
+        self.assertEqual(compact_text("Pay Out"), "payout")
+        self.assertEqual(compact_text("pay-out"), "payout")
+
     def test_score_prefers_exact_visible_button(self):
         s = score_dom_candidate(_btn(), "登录", expand_synonyms("登录"), "click")
         self.assertGreaterEqual(s, 100)
@@ -630,6 +756,63 @@ class DomScanScoringTest(unittest.TestCase):
         s_type = score_dom_candidate(btn, "用户名", expand_synonyms("用户名"), "type")
         s_click = score_dom_candidate(btn, "用户名", expand_synonyms("用户名"), "click")
         self.assertLess(s_type, s_click - 100)
+
+    def test_score_prefers_leaf_menuitem_over_expanded_parent(self):
+        parent = _btn(
+            tag="li",
+            type="menuitem",
+            role="menuitem",
+            text="Pay OutPay OutSingle Payout Review",
+            ariaExpanded="true",
+            childMenuItemCount=3,
+            childMenuCount=1,
+            rect={"left": 0, "top": 361, "right": 206, "bottom": 535,
+                  "width": 206, "height": 174},
+        )
+        leaf = _btn(
+            tag="li",
+            type="menuitem",
+            role="menuitem",
+            text="Pay Out",
+            ariaLabel="",
+            ariaExpanded="",
+            childMenuItemCount=0,
+            childMenuCount=0,
+            rect={"left": 0, "top": 399, "right": 206, "bottom": 433,
+                  "width": 206, "height": 34},
+        )
+        parent_score = score_dom_candidate(
+            parent, "pay out", expand_synonyms("pay out"), "click"
+        )
+        leaf_score = score_dom_candidate(
+            leaf, "pay out", expand_synonyms("pay out"), "click"
+        )
+        self.assertGreater(leaf_score, parent_score)
+
+    def test_web_text_match_prefers_leaf_menuitem_over_expanded_parent(self):
+        parent = {
+            "className": "li:menuitem",
+            "role": "menuitem",
+            "text": "Pay OutPay OutSingle Payout ReviewBulk Payout Review",
+            "ariaExpanded": "true",
+            "ariaCurrent": "",
+            "descendantMenuItemCount": 4,
+            "descendantMenuCount": 1,
+            "boundsInScreen": {"left": 0, "top": 361, "right": 206, "bottom": 535},
+        }
+        leaf = {
+            "className": "li:menuitem",
+            "role": "menuitem",
+            "text": "Pay Out",
+            "ariaExpanded": "",
+            "ariaCurrent": "",
+            "descendantMenuItemCount": 0,
+            "descendantMenuCount": 0,
+            "boundsInScreen": {"left": 0, "top": 399, "right": 206, "bottom": 433},
+        }
+        parent_score = _web_text_match_score(parent, "pay out", exact=False)
+        leaf_score = _web_text_match_score(leaf, "pay out", exact=False)
+        self.assertGreater(leaf_score, parent_score)
 
     def test_is_input_like(self):
         self.assertTrue(is_input_like({"tag": "input", "type": "text"}))
@@ -754,6 +937,43 @@ class ResolveViaDeepScanTest(unittest.TestCase):
             self.assertTrue(r.success)
         asyncio.run(run())
 
+    def test_deep_scan_prefers_leaf_menuitem_over_expanded_parent(self):
+        async def run():
+            parent = _btn(
+                tag="li",
+                type="menuitem",
+                role="menuitem",
+                text="Pay OutPay OutSingle Payout ReviewBulk Payout Review",
+                ariaLabel="",
+                ariaExpanded="true",
+                childMenuItemCount=4,
+                childMenuCount=1,
+                center={"x": 103, "y": 448},
+                rect={"left": 0, "top": 361, "right": 206, "bottom": 535,
+                      "width": 206, "height": 174},
+            )
+            leaf = _btn(
+                tag="li",
+                type="menuitem",
+                role="menuitem",
+                text="Pay Out",
+                ariaLabel="",
+                ariaExpanded="",
+                childMenuItemCount=0,
+                childMenuCount=0,
+                center={"x": 103, "y": 416},
+                rect={"left": 0, "top": 399, "right": 206, "bottom": 433,
+                      "width": 206, "height": 34},
+            )
+            res, _ = self._resolver(candidates=[parent, leaf])
+            r = await res.resolve_via_dom_deep_scan(
+                element_name="Pay Out", action="click"
+            )
+            self.assertTrue(r.success, r.diagnostics)
+            self.assertEqual((r.x, r.y), (103, 416))
+            self.assertEqual(r.diagnostics["candidate"]["text"], "Pay Out")
+        asyncio.run(run())
+
     def test_timeout_returns_unavailable(self):
         async def run():
             res, _ = self._resolver(timeout_on_scan=True)
@@ -869,6 +1089,7 @@ class HybridRecoveryTest(unittest.TestCase):
         self.assertIn("standard attempts=4", r.summary)
         self.assertIn("deep_scan=executed", r.summary)
         self.assertIn("top1_disabled", r.summary)
+        self.assertIn("system_button(back)", r.summary)
 
     def test_scroll_to_does_not_trigger_deep_scan(self):
         drv = DeepScanDriver(candidates=[_btn()])
@@ -1118,17 +1339,11 @@ class DeepScanShadowDomBrowserTest(unittest.TestCase):
     def test_resolve_via_deep_scan_hits_shadow_button(self):
         """端到端：通过 resolve_via_dom_deep_scan 命中 shadow 内的「登录」。"""
         from mobilerun.element.cache import ElementCache as _Cache
-        from mobilerun.element.resolver import (
-            DEEP_DOM_SCAN_JS,
-            INTERACTIVE_SELECTOR,
-            LocatorResolver as _Resolver,
-        )
+        from mobilerun.element.resolver import LocatorResolver as _Resolver
 
         html = self.SHADOW_HTML
 
         async def run():
-            import json as _json
-
             from playwright.async_api import async_playwright
 
             async with async_playwright() as p:

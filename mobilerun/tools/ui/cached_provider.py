@@ -54,6 +54,9 @@ class CachedStateProvider:
         # 快速比对。两者各司其职，不能混用。
         self._last_lightweight_fp: Optional[str] = None
         self._viewport: dict = {}
+        # 最近一次交互可能改变了 DOM / 弹层 / 当前页面判定；置位后下一次
+        # get_state() 必须走完整探测，而不是缓存快路径。
+        self._force_full_next: bool = False
 
     # ── 属性透传 ──────────────────────────────────────────────────────
 
@@ -85,6 +88,8 @@ class CachedStateProvider:
     # ── 主入口 ────────────────────────────────────────────────────────
 
     async def get_state(self) -> UIState:
+        if self._force_full_next:
+            return await self._full_probe()
         # 非 Web 平台：无 evaluate，无法轻量指纹 → 完整探测（零退化）
         if self._is_web:
             try:
@@ -115,6 +120,20 @@ class CachedStateProvider:
         if force_full:
             return await self._full_probe()
         return await self.get_state()
+
+    def mark_dirty(self, clear_current_page: bool = True) -> None:
+        """标记缓存状态已失效，要求下一次 ``get_state()`` 强制完整探测。
+
+        用于点击、输入、滚动、页面跳转等交互后的「下一帧必须刷新」场景。
+        这是框架级失效信号，不依赖某个具体网站是否跳 URL / 改 title。
+        """
+        self._force_full_next = True
+        self._last_lightweight_fp = None
+        self._last_full_state = None
+        if clear_current_page:
+            self._current_page = None
+        self._cache.reset_hits()
+        self.invalidate_viewport_cache()
 
     async def _try_cached_state(self) -> Optional[UIState]:
         """尝试走缓存快速路径，命中返回 UIState，否则返回 None。
@@ -179,6 +198,7 @@ class CachedStateProvider:
         # 现在 _current_page 已确定（含 key_element_texts），据此算出本页的
         # 轻量指纹快照，供下次 get_state 快速比对。
         self._last_lightweight_fp = await self._compute_lightweight_fingerprint()
+        self._force_full_next = False
 
         return full_state
 
